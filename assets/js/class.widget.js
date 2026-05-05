@@ -2,7 +2,7 @@
 	function esc(str) {
 		return String(str)
 			.replace(/&/g, '&amp;')
-			replace(/</g, '&lt;')
+			.replace(/</g, '&lt;')
 			.replace(/>/g, '&gt;')
 			.replace(/"/g, '&quot;')
 			.replace(/'/g, '&#39;');
@@ -992,26 +992,15 @@
 
 	class WidgetTopologyTest extends CWidget {
 		onStart() {
+			super.onStart();
 			setTimeout(scanAndRender, 0);
-			setTimeout(scanAndRender, 300);
-			setTimeout(scanAndRender, 1000);
 		}
 
 		onActivate() {
+			super.onActivate();
 			setTimeout(scanAndRender, 0);
-			setTimeout(scanAndRender, 300);
-			setTimeout(scanAndRender, 1000);
 		}
 	}
 
 	window.WidgetTopologyTest = WidgetTopologyTest;
-
-	if (document.readyState === 'loading') {
-		document.addEventListener('DOMContentLoaded', scanAndRender);
-	}
-	else {
-		setTimeout(scanAndRender, 0);
-	}
-
-	setInterval(scanAndRender, 1500);
 })();
