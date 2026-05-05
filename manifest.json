@@ -1,0 +1,26 @@
+{
+  "manifest_version": 2.0,
+  "id": "topology_widget_test",
+  "type": "widget",
+  "name": "Topology Test",
+  "namespace": "TopologyWidgetTest",
+  "version": "1.1",
+  "author": "Gustavo Farias",
+  "description": "Widget de teste para validar estrutura no Zabbix 7.0.",
+  "actions": {
+    "widget.topology_widget_test.view": {
+      "class": "WidgetView"
+    }
+  },
+  "widget": {
+    "name": "Topology Test",
+    "form_class": "WidgetForm",
+    "js_class": "WidgetTopologyTest",
+    "refresh_rate": 60
+  },
+  "assets": {
+    "js": [
+      "class.widget.js"
+    ]
+  }
+}
