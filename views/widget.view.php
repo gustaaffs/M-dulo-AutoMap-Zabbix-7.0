@@ -1,4 +1,3 @@
-cat > /usr/share/zabbix/modules/topology-widget-test/views/widget.view.php <<'EOF'
 <?php
 
 /**
@@ -48,4 +47,3 @@ $root->addItem($focus_btn);
 
 $widget->addItem($root);
 $widget->show();
-EOF

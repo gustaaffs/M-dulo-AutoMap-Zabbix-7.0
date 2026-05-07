@@ -1,4 +1,3 @@
-cat > /usr/share/zabbix/modules/topology-widget-test/assets/js/class.widget.js <<'EOF'
 (function () {
 	function esc(str) {
 		return String(str)
@@ -875,4 +874,3 @@ cat > /usr/share/zabbix/modules/topology-widget-test/assets/js/class.widget.js <
 
 	setInterval(scanAndRender, 1500);
 })();
-EOF

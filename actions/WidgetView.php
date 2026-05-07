@@ -1,4 +1,3 @@
-cat > /usr/share/zabbix/modules/topology-widget-test/actions/WidgetView.php <<'EOF'
 <?php
 
 namespace Modules\TopologyWidgetTest\Actions;
@@ -96,18 +95,15 @@ class WidgetView extends CControllerDashboardWidgetView {
 		}
 
 		$items = API::Item()->get([
-			'output' => ['itemid', 'hostid', 'name'],
-			'hostids' => $hostids,
+			'output'    => ['itemid', 'hostid', 'name'],
+			'hostids'   => $hostids,
 			'monitored' => true,
-			'search' => [
-				'name' => ['Vizinho CDP', 'Vizinho LLDP']
-			],
-			'searchByAny' => true,
+			'search'    => ['name' => 'Vizinho'],
 			'sortfield' => 'name',
 			'sortorder' => 'ASC'
 		]);
 
-		if (!$items) {
+		if (!is_array($items) || !$items) {
 			$response['message'] = 'Nenhum item "Vizinho CDP" ou "Vizinho LLDP" foi encontrado.';
 			$this->setResponse(new CControllerResponseData($response));
 			return;
@@ -168,12 +164,14 @@ class WidgetView extends CControllerDashboardWidgetView {
 				'hostids' => $center_hostids
 			]);
 
-			foreach ($central_rows as $row) {
-				$response['central_hosts'][] = [
-					'hostid' => $row['hostid'],
-					'name' => $row['name'],
-					'normalized' => $this->normalizeNodeName($row['name'])
-				];
+			if (is_array($central_rows)) {
+				foreach ($central_rows as $row) {
+					$response['central_hosts'][] = [
+						'hostid' => $row['hostid'],
+						'name' => $row['name'],
+						'normalized' => $this->normalizeNodeName($row['name'])
+					];
+				}
 			}
 		}
 
@@ -184,4 +182,3 @@ class WidgetView extends CControllerDashboardWidgetView {
 		$this->setResponse(new CControllerResponseData($response));
 	}
 }
-EOF
