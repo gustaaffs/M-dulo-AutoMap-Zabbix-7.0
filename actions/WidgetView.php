@@ -168,12 +168,14 @@ class WidgetView extends CControllerDashboardWidgetView {
 				'hostids' => $center_hostids
 			]);
 
-			foreach ($central_rows as $row) {
-				$response['central_hosts'][] = [
-					'hostid' => $row['hostid'],
-					'name' => $row['name'],
-					'normalized' => $this->normalizeNodeName($row['name'])
-				];
+			if (is_array($central_rows)) {
+				foreach ($central_rows as $row) {
+					$response['central_hosts'][] = [
+						'hostid' => $row['hostid'],
+						'name' => $row['name'],
+						'normalized' => $this->normalizeNodeName($row['name'])
+					];
+				}
 			}
 		}
 
@@ -182,14 +184,13 @@ class WidgetView extends CControllerDashboardWidgetView {
 			'hostids' => $hostids,
 			'monitored' => true,
 			'search' => [
-				'name' => ['Interface ', 'Operational status']
+				'name' => 'Interface'
 			],
-			'searchByAny' => false,
 			'sortfield' => 'name',
 			'sortorder' => 'ASC'
 		]);
 
-		foreach ($status_items as $item) {
+		foreach (is_array($status_items) ? $status_items : [] as $item) {
 			$name = trim($item['name']);
 
 			if (stripos($name, 'Interface ') !== 0 || stripos($name, 'Operational status') === false) {
