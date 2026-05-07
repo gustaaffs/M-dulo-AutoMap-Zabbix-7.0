@@ -29,6 +29,72 @@
 		return name.trim();
 	}
 
+	function normalizePort(port) {
+		if (!port) return '';
+		let p = String(port).trim();
+		p = p.replace(/\(.*?\)/g, '').trim();
+		p = p.replace(/\s+/g, '');
+		p = p.toLowerCase();
+		p = p.replace(/^twentyfivegigabitethernet/, 'twe');
+		p = p.replace(/^twentyfivegige/, 'twe');
+		p = p.replace(/^hundredgigabitethernet/, 'hu');
+		p = p.replace(/^hundredgige/, 'hu');
+		p = p.replace(/^tengigabitethernet/, 'te');
+		p = p.replace(/^gigabitethernet/, 'gi');
+		p = p.replace(/^fastethernet/, 'fa');
+		p = p.replace(/^ethernet/, 'eth');
+		p = p.replace(/^port-channel/, 'po');
+		return p;
+	}
+
+	// Interpreta o lastvalue do item de status operacional
+	function interpretStatus(value) {
+		const v = String(value || '').trim().toLowerCase();
+		if (v === '1' || v.startsWith('up')) return 'up';
+		if (v === '2' || v.startsWith('down')) return 'down';
+		return 'unknown';
+	}
+
+	// Parseia item "Interface Fa0/1(descricao): Operational status"
+	// Extrai o nome da interface antes do "(" e normaliza
+	function parseStatusItem(item) {
+		const host = normalizeName(item.host || '');
+		const name = String(item.name || '');
+
+		// Captura tudo entre "Interface " e "(" ou ":"
+		const match = name.match(/^Interface\s+(.+?)\s*(?:\(.*?\)\s*)?:\s*Operational status$/i);
+		if (!match) return null;
+
+		const rawIf = match[1].trim();
+		const normPort = normalizePort(rawIf);
+
+		if (!host || !normPort) return null;
+
+		return { host, rawIf, normPort, value: String(item.value || '') };
+	}
+
+	function buildStatusMap(items) {
+		const map = {};
+		(items || []).forEach((item) => {
+			const parsed = parseStatusItem(item);
+			if (!parsed) return;
+			if (!map[parsed.host]) map[parsed.host] = {};
+			map[parsed.host][parsed.normPort] = {
+				status: interpretStatus(parsed.value),
+				rawIf: parsed.rawIf,
+				value: parsed.value
+			};
+		});
+		return map;
+	}
+
+	function getStatusInfo(statusMap, host, port) {
+		const h = normalizeName(host || '');
+		const p = normalizePort(port || '');
+		if (!h || !p || !statusMap[h]) return null;
+		return statusMap[h][p] || null;
+	}
+
 	function anchorGroupKey(name) {
 		let base = normalizeName(name);
 		base = base.replace(/[-_.]?\d+$/, '');
@@ -61,18 +127,23 @@
 			if (!adjacency[source]) adjacency[source] = [];
 			if (!adjacency[target]) adjacency[target] = [];
 
+			// statusHost = target porque a porta no item CDP é a porta do vizinho
 			adjacency[source].push({
 				peer: target,
 				protocol: protocol,
 				port: port,
-				rawItem: rawItem
+				rawItem: rawItem,
+				statusHost: target,
+				statusPort: port
 			});
 
 			adjacency[target].push({
 				peer: source,
 				protocol: protocol,
 				port: port,
-				rawItem: rawItem
+				rawItem: rawItem,
+				statusHost: target,
+				statusPort: port
 			});
 		});
 
@@ -159,7 +230,7 @@
 		};
 	}
 
-	function renderPopupContent(node, model, centralHosts) {
+	function renderPopupContent(node, model, centralHosts, statusMap) {
 		const neighbors = (model.adjacency[node] || []).slice().sort((a, b) => naturalCompare(a.peer, b.peer));
 		const degree = model.degreeMap[node] || 0;
 		const isCentral = (centralHosts || []).some((h) => normalizeName(h.normalized || h.name || '') === node);
@@ -180,10 +251,20 @@
 		html += '<div style="max-height:240px; overflow:auto; border-top:1px solid #1f2937; padding-top:8px;">';
 
 		neighbors.forEach((n) => {
+			const info = getStatusInfo(statusMap, n.statusHost, n.statusPort);
+			const status = info ? info.status : null;
+			const statusColor = status === 'up' ? '#22c55e' : status === 'down' ? '#ef4444' : '#94a3b8';
+
 			html += '<div style="padding:8px 0; border-bottom:1px solid #1f2937;">';
 			html += '<div style="font-weight:600;">' + esc(n.peer) + '</div>';
 			html += '<div style="font-size:12px; color:#cbd5e1;">Protocolo: ' + esc(n.protocol || '-') + '</div>';
 			html += '<div style="font-size:12px; color:#cbd5e1;">Porta: ' + esc(n.port || '-') + '</div>';
+			if (status) {
+				html += '<div style="font-size:12px; color:' + statusColor + '; font-weight:600;">Status: ' + esc(status) + '</div>';
+				if (info.rawIf) {
+					html += '<div style="font-size:11px; color:#64748b;">Interface: ' + esc(info.rawIf) + '</div>';
+				}
+			}
 			html += '</div>';
 		});
 
@@ -296,7 +377,9 @@
 					source: source,
 					target: target,
 					protocol: n.protocol || '',
-					port: ''
+					port: '',
+					statusHost: n.statusHost || '',
+					statusPort: n.statusPort || ''
 				});
 
 				seen.add(pairKey);
@@ -343,7 +426,8 @@
 				if (source === target) return;
 				if (!visibleNodes.has(source) || !visibleNodes.has(target)) return;
 
-				const pairKey = [source, target].sort(naturalCompare).join('|') + '|' + (n.protocol || '') + '|' + (source === ownerA && target === ownerB ? 'agg' : (n.port || ''));
+				const isAgg = source === ownerA && target === ownerB;
+				const pairKey = [source, target].sort(naturalCompare).join('|') + '|' + (n.protocol || '') + '|' + (isAgg ? 'agg' : (n.port || ''));
 
 				if (seen.has(pairKey)) return;
 
@@ -351,7 +435,9 @@
 					source: source,
 					target: target,
 					protocol: n.protocol || '',
-					port: source === ownerA && target === ownerB ? '' : (n.port || '')
+					port: isAgg ? '' : (n.port || ''),
+					statusHost: isAgg ? '' : (n.statusHost || ''),
+					statusPort: isAgg ? '' : (n.statusPort || '')
 				});
 
 				seen.add(pairKey);
@@ -506,6 +592,7 @@
 
 			let links = [];
 			let centralHosts = [];
+			let interfaceStatuses = [];
 
 			try {
 				links = JSON.parse(atob(rootEl.dataset.links || ''));
@@ -522,6 +609,14 @@
 				centralHosts = [];
 			}
 
+			try {
+				interfaceStatuses = JSON.parse(atob(rootEl.dataset.interfaceStatuses || ''));
+			}
+			catch (e) {
+				interfaceStatuses = [];
+			}
+
+			const statusMap = buildStatusMap(interfaceStatuses);
 			const model = buildModel(links);
 			const preferredAnchors = centralHosts
 				.map((host) => normalizeName(host.normalized || host.name || ''))
@@ -601,6 +696,13 @@
 					let color = '#60a5fa';
 					if (String(link.protocol || '').toUpperCase() === 'LLDP') {
 						color = '#34d399';
+					}
+					const sInfo = link.statusHost
+						? getStatusInfo(statusMap, link.statusHost, link.statusPort)
+						: null;
+					if (sInfo) {
+						if (sInfo.status === 'up') color = '#22c55e';
+						else if (sInfo.status === 'down') color = '#ef4444';
 					}
 
 					const dash = String(link.protocol || '').toUpperCase() === 'LLDP' ? ' stroke-dasharray="6 3" ' : '';
@@ -819,7 +921,7 @@
 						rootEl.dataset.selectedNode = node;
 						scheduleDraw();
 
-						const html = renderPopupContent(node, model, centralHosts);
+						const html = renderPopupContent(node, model, centralHosts, statusMap);
 						showPopup(rootEl, popupEl, html, event.clientX, event.clientY);
 					});
 				});

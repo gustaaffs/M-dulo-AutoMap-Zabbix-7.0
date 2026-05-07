@@ -50,6 +50,7 @@ class WidgetView extends CControllerDashboardWidgetView {
 			'group_name' => '',
 			'unique_links' => [],
 			'central_hosts' => [],
+			'interface_status_items' => [],
 			'message' => '',
 			'user' => [
 				'debug_mode' => $this->getDebugMode()
@@ -177,6 +178,31 @@ class WidgetView extends CControllerDashboardWidgetView {
 
 		if (!$response['unique_links']) {
 			$response['message'] = 'Os itens foram encontrados, mas nenhum link único foi gerado.';
+		}
+
+		// Interface operational status items (porta está no vizinho/target)
+		$status_items = API::Item()->get([
+			'output'    => ['itemid', 'hostid', 'name', 'lastvalue'],
+			'hostids'   => $hostids,
+			'monitored' => true,
+			'search'    => ['name' => 'Operational status'],
+			'sortfield' => 'name',
+			'sortorder' => 'ASC'
+		]);
+
+		if (is_array($status_items)) {
+			foreach ($status_items as $item) {
+				$name = trim($item['name']);
+				// Aceita apenas itens que começam com "Interface"
+				if (stripos($name, 'Interface ') !== 0) {
+					continue;
+				}
+				$response['interface_status_items'][] = [
+					'host'  => $host_map[$item['hostid']] ?? ('Host_' . $item['hostid']),
+					'name'  => $name,
+					'value' => (string) $item['lastvalue']
+				];
+			}
 		}
 
 		$this->setResponse(new CControllerResponseData($response));
