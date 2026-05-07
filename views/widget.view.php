@@ -21,14 +21,10 @@ $links_b64 = base64_encode($links_json);
 $central_json = json_encode($data['central_hosts'] ?? [], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 $central_b64 = base64_encode($central_json);
 
-$status_json = json_encode($data['interface_status_items'] ?? [], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-$status_b64 = base64_encode($status_json);
-
 $root = new CDiv();
 $root->addClass('topology-test-widget');
 $root->setAttribute('data-links', $links_b64);
 $root->setAttribute('data-central-hosts', $central_b64);
-$root->setAttribute('data-interface-statuses', $status_b64);
 $root->setAttribute('data-group-name', (string) ($data['group_name'] ?? ''));
 $root->setAttribute('data-group-id', (string) ($data['selected_group'] ?? ''));
 $root->setAttribute('style', 'position:relative; width:100%; min-height:860px; background:#0f172a; border:1px solid #1e293b; border-radius:10px; overflow:hidden;');

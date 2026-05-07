@@ -65,78 +65,6 @@
 		return p;
 	}
 
-	function parseStatusItem(item) {
-		const host = normalizeName(item.host || '');
-		const name = String(item.name || '');
-
-		const match = name.match(/^Interface\s+(.+?)\s*:\s*Operational status$/i);
-		if (!match) return null;
-
-		const rawIf = match[1].trim();
-		const rawPort = rawIf.replace(/\(.*?\)/g, '').trim();
-		const normPort = normalizePort(rawPort);
-
-		return {
-			host: host,
-			rawIf: rawIf,
-			rawPort: rawPort,
-			normPort: normPort,
-			value: String(item.value || '')
-		};
-	}
-
-	function interpretStatus(value) {
-		const v = String(value || '').trim().toLowerCase();
-
-		if (v === '1' || v === 'up' || v === 'up(1)' || v === 'up (1)') return 'up';
-		if (v === '2' || v === 'down' || v === 'down(2)' || v === 'down (2)') return 'down';
-		return 'unknown';
-	}
-
-	function buildStatusMap(items) {
-		const map = {};
-
-		(items || []).forEach((item) => {
-			const parsed = parseStatusItem(item);
-			if (!parsed || !parsed.host || !parsed.normPort) return;
-
-			if (!map[parsed.host]) {
-				map[parsed.host] = {};
-			}
-
-			map[parsed.host][parsed.normPort] = {
-				status: interpretStatus(parsed.value),
-				rawIf: parsed.rawIf,
-				rawPort: parsed.rawPort,
-				normPort: parsed.normPort,
-				value: parsed.value
-			};
-		});
-
-		return map;
-	}
-
-	function getStatusInfoByHostPort(statusMap, host, port) {
-		const h = normalizeName(host || '');
-		const p = normalizePort(port || '');
-
-		if (!h || !p) {
-			return null;
-		}
-
-		if (!statusMap[h] || !statusMap[h][p]) {
-			return null;
-		}
-
-		return statusMap[h][p];
-	}
-
-	function getEdgeStatusColor(status) {
-		if (status === 'up') return '#22c55e';
-		if (status === 'down') return '#ef4444';
-		return null;
-	}
-
 	function anchorGroupKey(name) {
 		let base = normalizeName(name);
 		base = base.replace(/[-_.]?\d+$/, '');
@@ -273,7 +201,7 @@
 		};
 	}
 
-	function renderPopupContent(node, model, centralHosts, statusMap) {
+	function renderPopupContent(node, model, centralHosts) {
 		const neighbors = (model.adjacency[node] || []).slice().sort((a, b) => naturalCompare(a.peer, b.peer));
 		const degree = model.degreeMap[node] || 0;
 		const isCentral = (centralHosts || []).some((h) => normalizeName(h.normalized || h.name || '') === node);
@@ -294,20 +222,10 @@
 		html += '<div style="max-height:260px; overflow:auto; border-top:1px solid #1f2937; padding-top:8px;">';
 
 		neighbors.forEach((n) => {
-			const info = getStatusInfoByHostPort(statusMap, n.statusHost, n.statusPort);
-			const status = info ? info.status : 'unknown';
-			const statusColor = status === 'up' ? '#22c55e' : (status === 'down' ? '#ef4444' : '#94a3b8');
-
 			html += '<div style="padding:8px 0; border-bottom:1px solid #1f2937;">';
 			html += '<div style="font-weight:600;">' + esc(n.peer) + '</div>';
 			html += '<div style="font-size:12px; color:#cbd5e1;">Protocolo: ' + esc(n.protocol || '-') + '</div>';
 			html += '<div style="font-size:12px; color:#cbd5e1;">Porta: ' + esc(n.port || '-') + '</div>';
-			html += '<div style="font-size:12px; color:' + statusColor + '; font-weight:600;">Status: ' + esc(status) + '</div>';
-
-			if (info) {
-				html += '<div style="font-size:12px; color:#cbd5e1;">Interface: ' + esc(info.rawIf || info.rawPort || '-') + '</div>';
-			}
-
 			html += '</div>';
 		});
 
@@ -634,7 +552,6 @@
 
 			let links = [];
 			let centralHosts = [];
-			let interfaceStatuses = [];
 
 			try {
 				links = JSON.parse(atob(rootEl.dataset.links || ''));
@@ -651,14 +568,6 @@
 				centralHosts = [];
 			}
 
-			try {
-				interfaceStatuses = JSON.parse(atob(rootEl.dataset.interfaceStatuses || ''));
-			}
-			catch (e) {
-				interfaceStatuses = [];
-			}
-
-			const statusMap = buildStatusMap(interfaceStatuses);
 			const model = buildModel(links);
 			const preferredAnchors = centralHosts
 				.map((host) => normalizeName(host.normalized || host.name || ''))
@@ -736,11 +645,8 @@
 
 					const active = !selectedNode || s === selectedNode || t === selectedNode;
 
-					const statusInfo = getStatusInfoByHostPort(statusMap, link.statusHost, link.statusPort);
-					const statusColor = statusInfo ? getEdgeStatusColor(statusInfo.status) : null;
-
-					let color = statusColor || '#60a5fa';
-					if (!statusColor && String(link.protocol || '').toUpperCase() === 'LLDP') {
+					let color = '#60a5fa';
+					if (String(link.protocol || '').toUpperCase() === 'LLDP') {
 						color = '#34d399';
 					}
 
@@ -960,7 +866,7 @@
 						rootEl.dataset.selectedNode = node;
 						scheduleDraw();
 
-						const html = renderPopupContent(node, model, centralHosts, statusMap);
+						const html = renderPopupContent(node, model, centralHosts);
 						showPopup(rootEl, popupEl, html, event.clientX, event.clientY);
 					});
 				});

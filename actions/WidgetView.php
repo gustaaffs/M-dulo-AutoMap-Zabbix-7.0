@@ -50,7 +50,6 @@ class WidgetView extends CControllerDashboardWidgetView {
 			'group_name' => '',
 			'unique_links' => [],
 			'central_hosts' => [],
-			'interface_status_items' => [],
 			'message' => '',
 			'user' => [
 				'debug_mode' => $this->getDebugMode()
@@ -177,31 +176,6 @@ class WidgetView extends CControllerDashboardWidgetView {
 					];
 				}
 			}
-		}
-
-		$status_items = API::Item()->get([
-			'output' => ['itemid', 'hostid', 'name', 'lastvalue'],
-			'hostids' => $hostids,
-			'monitored' => true,
-			'search' => [
-				'name' => 'Interface'
-			],
-			'sortfield' => 'name',
-			'sortorder' => 'ASC'
-		]);
-
-		foreach (is_array($status_items) ? $status_items : [] as $item) {
-			$name = trim($item['name']);
-
-			if (stripos($name, 'Interface ') !== 0 || stripos($name, 'Operational status') === false) {
-				continue;
-			}
-
-			$response['interface_status_items'][] = [
-				'host' => $host_map[$item['hostid']] ?? ('HostID ' . $item['hostid']),
-				'name' => $name,
-				'value' => (string) $item['lastvalue']
-			];
 		}
 
 		if (!$response['unique_links']) {
