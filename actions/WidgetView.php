@@ -1,3 +1,4 @@
+cat > /usr/share/zabbix/modules/topology-widget-test/actions/WidgetView.php <<'EOF'
 <?php
 
 namespace Modules\TopologyWidgetTest\Actions;
@@ -8,161 +9,179 @@ use CControllerResponseData;
 
 class WidgetView extends CControllerDashboardWidgetView {
 
+	private function normalizeNodeName(string $name): string {
+		$name = trim($name);
+		$name = strtolower($name);
+
+		if (strpos($name, '.') !== false) {
+			$name = explode('.', $name)[0];
+		}
+
+		return trim($name);
+	}
+
+	private function extractIds($raw): array {
+		if (!is_array($raw)) {
+			$raw = [$raw];
+		}
+
+		$ids = [];
+
+		foreach ($raw as $value) {
+			if (is_array($value) && isset($value['id']) && $value['id'] !== '') {
+				$ids[] = (string) $value['id'];
+			}
+			elseif (is_scalar($value) && (string) $value !== '') {
+				$ids[] = (string) $value;
+			}
+		}
+
+		return array_values(array_unique($ids));
+	}
+
 	protected function doAction(): void {
+		$groupids = $this->extractIds($this->fields_values['groupids'] ?? []);
+		$center_hostids = $this->extractIds($this->fields_values['center_hostids'] ?? []);
+
+		$selected_group = $groupids ? $groupids[0] : null;
+
 		$response = [
-			'name'         => $this->getInput('name', $this->widget->getDefaultName()),
+			'name' => $this->getInput('name', $this->widget->getDefaultName()),
+			'selected_group' => $selected_group ?? 'nenhum',
+			'group_name' => '',
 			'unique_links' => [],
-			'central_hosts'=> [],
-			'message'      => '',
-			'user'         => ['debug_mode' => $this->getDebugMode()]
+			'central_hosts' => [],
+			'message' => '',
+			'user' => [
+				'debug_mode' => $this->getDebugMode()
+			]
 		];
 
-		// --- resolve group ---
-		$groupids_raw = $this->fields_values['groupids'] ?? [];
-		if (!is_array($groupids_raw)) {
-			$groupids_raw = [$groupids_raw];
-		}
-
-		$selected_group = null;
-		foreach ($groupids_raw as $v) {
-			if (is_array($v) && isset($v['id']) && $v['id'] !== '') {
-				$selected_group = (string) $v['id'];
-				break;
-			}
-			elseif (is_scalar($v) && (string) $v !== '') {
-				$selected_group = (string) $v;
-				break;
-			}
-		}
-
-		if (!$selected_group) {
+		if ($selected_group === null) {
 			$response['message'] = 'Selecione um grupo no widget.';
 			$this->setResponse(new CControllerResponseData($response));
 			return;
 		}
 
-		// --- hosts in group ---
+		$groups = API::HostGroup()->get([
+			'output' => ['groupid', 'name'],
+			'groupids' => [$selected_group]
+		]);
+
+		if ($groups) {
+			$response['group_name'] = $groups[0]['name'];
+		}
+		else {
+			$response['group_name'] = 'Grupo ' . $selected_group;
+		}
+
 		$hosts = API::Host()->get([
-			'output'          => ['hostid', 'name'],
-			'groupids'        => [$selected_group],
+			'output' => ['hostid', 'name'],
+			'groupids' => [$selected_group],
 			'monitored_hosts' => true
 		]);
 
-		if (!is_array($hosts) || !$hosts) {
-			$response['message'] = 'Nenhum host monitorado no grupo selecionado.';
+		if (!$hosts) {
+			$response['message'] = 'Nenhum host monitorado encontrado no grupo selecionado.';
 			$this->setResponse(new CControllerResponseData($response));
 			return;
 		}
 
 		$host_map = [];
-		$hostids  = [];
-		foreach ($hosts as $h) {
-			$host_map[$h['hostid']] = $h['name'];
-			$hostids[] = $h['hostid'];
+		$hostids = [];
+
+		foreach ($hosts as $host) {
+			$host_map[$host['hostid']] = $host['name'];
+			$hostids[] = $host['hostid'];
 		}
 
-		// --- neighbor items (single string search to avoid API exception) ---
 		$items = API::Item()->get([
-			'output'    => ['itemid', 'hostid', 'name'],
-			'hostids'   => $hostids,
+			'output' => ['itemid', 'hostid', 'name'],
+			'hostids' => $hostids,
 			'monitored' => true,
-			'search'    => ['name' => 'Vizinho'],
+			'search' => [
+				'name' => ['Vizinho CDP', 'Vizinho LLDP']
+			],
+			'searchByAny' => true,
 			'sortfield' => 'name',
 			'sortorder' => 'ASC'
 		]);
 
-		if (!is_array($items) || !$items) {
-			$response['message'] = 'Nenhum item "Vizinho CDP" ou "Vizinho LLDP" encontrado.';
+		if (!$items) {
+			$response['message'] = 'Nenhum item "Vizinho CDP" ou "Vizinho LLDP" foi encontrado.';
 			$this->setResponse(new CControllerResponseData($response));
 			return;
 		}
 
-		// --- build unique link map ---
 		$unique_map = [];
 
 		foreach ($items as $item) {
-			$source_raw = $host_map[$item['hostid']] ?? ('Host_' . $item['hostid']);
-			$name       = trim($item['name']);
-			$protocol   = '';
-			$target_raw = '';
-			$port       = '';
+			$source_host_raw = $host_map[$item['hostid']] ?? ('HostID ' . $item['hostid']);
+			$item_name = trim($item['name']);
 
-			if (preg_match('/^Vizinho\s+(CDP|LLDP)\s*:\s*(.+?)\s*\(Porta\s+(.+?)\)\s*$/iu', $name, $m)) {
-				$protocol   = strtoupper(trim($m[1]));
-				$target_raw = trim($m[2]);
-				$port       = trim($m[3]);
+			$protocol = '';
+			$target_raw = '';
+			$port = '';
+
+			if (preg_match('/^Vizinho\s+(CDP|LLDP)\s*:\s*(.+?)\s*\(Porta\s+(.+?)\)\s*$/iu', $item_name, $matches)) {
+				$protocol = strtoupper(trim($matches[1]));
+				$target_raw = trim($matches[2]);
+				$port = trim($matches[3]);
 			}
-			elseif (preg_match('/^Vizinho\s+(CDP|LLDP)\s*:\s*(.+?)\s*$/iu', $name, $m)) {
-				$protocol   = strtoupper(trim($m[1]));
-				$target_raw = trim($m[2]);
+			elseif (preg_match('/^Vizinho\s+(CDP|LLDP)\s*:\s*(.+?)\s*$/iu', $item_name, $matches)) {
+				$protocol = strtoupper(trim($matches[1]));
+				$target_raw = trim($matches[2]);
+				$port = '';
 			}
 			else {
 				continue;
 			}
 
-			$src = strtolower(trim(explode('.', trim($source_raw))[0]));
-			$tgt = strtolower(trim(explode('.', trim($target_raw))[0]));
+			$source_norm = $this->normalizeNodeName($source_host_raw);
+			$target_norm = $this->normalizeNodeName($target_raw);
 
-			if ($src === '' || $tgt === '') {
+			if ($source_norm === '' || $target_norm === '') {
 				continue;
 			}
 
-			$pair = [$src, $tgt];
+			$pair = [$source_norm, $target_norm];
 			sort($pair, SORT_STRING);
+
 			$key = implode('|', $pair) . '|' . $protocol . '|' . $port;
 
 			if (!isset($unique_map[$key])) {
 				$unique_map[$key] = [
-					'source'   => $src,
-					'target'   => $tgt,
+					'source' => $source_norm,
+					'target' => $target_norm,
 					'protocol' => $protocol,
-					'port'     => $port
+					'port' => $port,
+					'raw_item' => $item_name
 				];
 			}
 		}
 
 		$response['unique_links'] = array_values($unique_map);
 
-		if (!$response['unique_links']) {
-			$response['message'] = 'Itens encontrados, mas nenhum link gerado. Verifique o formato dos nomes dos itens.';
-			$this->setResponse(new CControllerResponseData($response));
-			return;
-		}
-
-		// --- central hosts (optional) ---
-		$center_hostids_raw = $this->fields_values['center_hostids'] ?? [];
-		if (!is_array($center_hostids_raw)) {
-			$center_hostids_raw = [$center_hostids_raw];
-		}
-
-		$center_hostids = [];
-		foreach ($center_hostids_raw as $v) {
-			if (is_array($v) && isset($v['id']) && $v['id'] !== '') {
-				$center_hostids[] = (string) $v['id'];
-			}
-			elseif (is_scalar($v) && (string) $v !== '') {
-				$center_hostids[] = (string) $v;
-			}
-		}
-
 		if ($center_hostids) {
 			$central_rows = API::Host()->get([
-				'output'  => ['hostid', 'name'],
+				'output' => ['hostid', 'name'],
 				'hostids' => $center_hostids
 			]);
 
-			if (is_array($central_rows)) {
-				foreach ($central_rows as $row) {
-					$norm = strtolower(trim(explode('.', trim($row['name']))[0]));
-					$response['central_hosts'][] = [
-						'hostid'     => $row['hostid'],
-						'name'       => $row['name'],
-						'normalized' => $norm
-					];
-				}
+			foreach ($central_rows as $row) {
+				$response['central_hosts'][] = [
+					'hostid' => $row['hostid'],
+					'name' => $row['name'],
+					'normalized' => $this->normalizeNodeName($row['name'])
+				];
 			}
+		}
+
+		if (!$response['unique_links']) {
+			$response['message'] = 'Os itens foram encontrados, mas nenhum link único foi gerado.';
 		}
 
 		$this->setResponse(new CControllerResponseData($response));
 	}
 }
+EOF

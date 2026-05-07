@@ -1,3 +1,4 @@
+cat > /usr/share/zabbix/modules/topology-widget-test/assets/js/class.widget.js <<'EOF'
 (function () {
 	function esc(str) {
 		return String(str)
@@ -29,42 +30,6 @@
 		return name.trim();
 	}
 
-	function normalizePort(port) {
-		if (!port) return '';
-
-		let p = String(port).trim();
-
-		// remove descrição entre parenteses
-		p = p.replace(/\(.*?\)/g, '').trim();
-
-		// remove espaços
-		p = p.replace(/\s+/g, '');
-
-		// caixa baixa
-		p = p.toLowerCase();
-
-		// formas longas -> curtas
-		p = p.replace(/^twentyfivegige/, 'twe');
-		p = p.replace(/^twentyfivegigabitethernet/, 'twe');
-		p = p.replace(/^hundredgige/, 'hu');
-		p = p.replace(/^hundredgigabitethernet/, 'hu');
-		p = p.replace(/^tengigabitethernet/, 'te');
-		p = p.replace(/^gigabitethernet/, 'gi');
-		p = p.replace(/^fastethernet/, 'fa');
-		p = p.replace(/^ethernet/, 'eth');
-		p = p.replace(/^port-channel/, 'po');
-
-		// formas já abreviadas
-		p = p.replace(/^twe/, 'twe');
-		p = p.replace(/^te/, 'te');
-		p = p.replace(/^gi/, 'gi');
-		p = p.replace(/^fa/, 'fa');
-		p = p.replace(/^eth/, 'eth');
-		p = p.replace(/^po/, 'po');
-
-		return p;
-	}
-
 	function anchorGroupKey(name) {
 		let base = normalizeName(name);
 		base = base.replace(/[-_.]?\d+$/, '');
@@ -72,7 +37,7 @@
 		return base || normalizeName(name);
 	}
 
-	const DRAG_GAIN = 1.0;
+	const DRAG_GAIN = 1.8;
 
 	function buildModel(links) {
 		const nodesMap = {};
@@ -97,24 +62,18 @@
 			if (!adjacency[source]) adjacency[source] = [];
 			if (!adjacency[target]) adjacency[target] = [];
 
-			// porta vem do host alvo/vizinho
 			adjacency[source].push({
 				peer: target,
 				protocol: protocol,
 				port: port,
-				rawItem: rawItem,
-				statusHost: target,
-				statusPort: port
+				rawItem: rawItem
 			});
 
-			// espelha preservando onde o status mora
 			adjacency[target].push({
 				peer: source,
 				protocol: protocol,
 				port: port,
-				rawItem: rawItem,
-				statusHost: target,
-				statusPort: port
+				rawItem: rawItem
 			});
 		});
 
@@ -219,7 +178,7 @@
 		html += '<div style="margin-bottom:8px;"><strong>Grau:</strong> ' + degree + '</div>';
 		html += '<div style="margin-bottom:12px;"><strong>Host central:</strong> ' + (isCentral ? 'sim' : 'não') + '</div>';
 		html += '<div style="font-size:14px; font-weight:700; margin-bottom:8px;">Conexões</div>';
-		html += '<div style="max-height:260px; overflow:auto; border-top:1px solid #1f2937; padding-top:8px;">';
+		html += '<div style="max-height:240px; overflow:auto; border-top:1px solid #1f2937; padding-top:8px;">';
 
 		neighbors.forEach((n) => {
 			html += '<div style="padding:8px 0; border-bottom:1px solid #1f2937;">';
@@ -240,7 +199,7 @@
 		let top = clientY - rootRect.top + 12;
 
 		const popupWidth = 320;
-		const popupHeight = 380;
+		const popupHeight = 360;
 
 		if (left + popupWidth > rootRect.width - 12) left = rootRect.width - popupWidth - 12;
 		if (top + popupHeight > rootRect.height - 12) top = rootRect.height - popupHeight - 12;
@@ -338,9 +297,7 @@
 					source: source,
 					target: target,
 					protocol: n.protocol || '',
-					port: '',
-					statusHost: '',
-					statusPort: ''
+					port: ''
 				});
 
 				seen.add(pairKey);
@@ -387,7 +344,7 @@
 				if (source === target) return;
 				if (!visibleNodes.has(source) || !visibleNodes.has(target)) return;
 
-				const pairKey = [source, target].sort(naturalCompare).join('|') + '|' + (n.protocol || '') + '|' + (source === ownerA && target === ownerB ? 'agg' : (n.statusHost + '|' + n.statusPort));
+				const pairKey = [source, target].sort(naturalCompare).join('|') + '|' + (n.protocol || '') + '|' + (source === ownerA && target === ownerB ? 'agg' : (n.port || ''));
 
 				if (seen.has(pairKey)) return;
 
@@ -395,9 +352,7 @@
 					source: source,
 					target: target,
 					protocol: n.protocol || '',
-					port: source === ownerA && target === ownerB ? '' : (n.port || ''),
-					statusHost: source === ownerA && target === ownerB ? '' : (n.statusHost || ''),
-					statusPort: source === ownerA && target === ownerB ? '' : (n.statusPort || '')
+					port: source === ownerA && target === ownerB ? '' : (n.port || '')
 				});
 
 				seen.add(pairKey);
@@ -644,7 +599,6 @@
 					if (!positions[s] || !positions[t]) return;
 
 					const active = !selectedNode || s === selectedNode || t === selectedNode;
-
 					let color = '#60a5fa';
 					if (String(link.protocol || '').toUpperCase() === 'LLDP') {
 						color = '#34d399';
@@ -898,15 +852,27 @@
 
 	class WidgetTopologyTest extends CWidget {
 		onStart() {
-			super.onStart();
 			setTimeout(scanAndRender, 0);
+			setTimeout(scanAndRender, 300);
+			setTimeout(scanAndRender, 1000);
 		}
 
 		onActivate() {
-			super.onActivate();
 			setTimeout(scanAndRender, 0);
+			setTimeout(scanAndRender, 300);
+			setTimeout(scanAndRender, 1000);
 		}
 	}
 
 	window.WidgetTopologyTest = WidgetTopologyTest;
+
+	if (document.readyState === 'loading') {
+		document.addEventListener('DOMContentLoaded', scanAndRender);
+	}
+	else {
+		setTimeout(scanAndRender, 0);
+	}
+
+	setInterval(scanAndRender, 1500);
 })();
+EOF
