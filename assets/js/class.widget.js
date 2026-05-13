@@ -183,6 +183,85 @@
 		};
 	}
 
+	// Speed item (bps). Nome no padrão "Interface XX(...): Speed".
+	function parseSpeedItem(item) {
+		const host = normalizeName(item.host || '');
+		const name = String(item.name || '');
+		const match = name.match(/^Interface\s+(.+?)\s*(?:\(.*?\)\s*)?:\s*Speed\s*$/i);
+		if (!match) return null;
+		const rawIf = match[1].trim();
+		const normPort = normalizePort(rawIf);
+		if (!host || !normPort) return null;
+		const value = parseFloat(item.value);
+		const units = String(item.units || '').toLowerCase();
+		// Converte para bps. Se units contém Mbps/Gbps converte; senão assume bps.
+		let bps = value;
+		if (isFinite(value)) {
+			if (units.indexOf('gbps') !== -1 || units.indexOf('gbit') !== -1) bps = value * 1e9;
+			else if (units.indexOf('mbps') !== -1 || units.indexOf('mbit') !== -1) bps = value * 1e6;
+			else if (units.indexOf('kbps') !== -1 || units.indexOf('kbit') !== -1) bps = value * 1e3;
+			// alguns templates já entregam em bps (ifHighSpeed * 1e6 já normalizado)
+		}
+		return { host, normPort, bps };
+	}
+
+	function buildSpeedMap(items) {
+		const map = {};
+		(items || []).forEach((item) => {
+			const parsed = parseSpeedItem(item);
+			if (!parsed || !isFinite(parsed.bps) || parsed.bps <= 0) return;
+			if (!map[parsed.host]) map[parsed.host] = {};
+			map[parsed.host][parsed.normPort] = parsed.bps;
+		});
+		return map;
+	}
+
+	function getSpeedBps(speedMap, host, port) {
+		const h = normalizeName(host || '');
+		const p = normalizePort(port || '');
+		if (!h || !p || !speedMap[h]) return null;
+		return speedMap[h][p] || null;
+	}
+
+	// Maior utilização (%) entre membros do link, considerando max(in,out)/speed.
+	// Retorna { pct, peakBps, speedBps } ou null se desconhecido.
+	function aggregateMembersUtilization(trafficMap, speedMap, members) {
+		if (!members || !members.length) return null;
+		let bestPct = -1;
+		let peakBps = 0;
+		let speedBps = 0;
+		members.forEach((m) => {
+			const t = getTrafficInfo(trafficMap, m.statusHost, m.statusPort);
+			const sp = getSpeedBps(speedMap, m.statusHost, m.statusPort);
+			if (!t || !sp || sp <= 0) return;
+			const peak = Math.max(
+				typeof t.in === 'number' ? t.in : 0,
+				typeof t.out === 'number' ? t.out : 0
+			);
+			const pct = (peak / sp) * 100;
+			if (pct > bestPct) {
+				bestPct = pct;
+				peakBps = peak;
+				speedBps = sp;
+			}
+		});
+		if (bestPct < 0) return null;
+		return { pct: bestPct, peakBps, speedBps };
+	}
+
+	function colorForUtilization(pct, warnPct, critPct) {
+		if (pct >= critPct) return '#ef4444';   // vermelho
+		if (pct >= warnPct) return '#facc15';   // amarelo
+		return '#22c55e';                       // verde
+	}
+
+	// Espessura proporcional à utilização (escala log para dar leitura mesmo em valores baixos).
+	function strokeForUtilization(pct) {
+		if (!isFinite(pct) || pct <= 0) return 1.6;
+		const s = 1.6 + Math.log10(1 + pct) * 2.2; // ~1.6 a ~6
+		return Math.min(7, Math.max(1.6, s));
+	}
+
 	function getStatusInfo(statusMap, host, port) {
 		const h = normalizeName(host || '');
 		const p = normalizePort(port || '');
@@ -325,10 +404,15 @@
 		};
 	}
 
-	function renderPopupContent(node, model, centralHosts, statusMap, trafficMap) {
+	function renderPopupContent(node, model, centralHosts, statusMap, trafficMap, speedMap, opts) {
 		const neighbors = (model.adjacency[node] || []).slice().sort((a, b) => naturalCompare(a.peer, b.peer));
 		const degree = model.degreeMap[node] || 0;
 		const isCentral = (centralHosts || []).some((h) => normalizeName(h.normalized || h.name || '') === node);
+		opts = opts || {};
+		const unmanagedSet = opts.unmanagedSet || new Set();
+		const utilWarnPct = opts.utilWarnPct || 60;
+		const utilCritPct = opts.utilCritPct || 85;
+		const isUnmanaged = unmanagedSet.has(node);
 
 		let tier = 'Borda';
 		if (degree >= 4) tier = 'Core';
@@ -339,6 +423,10 @@
 		html += '<div style="font-size:17px; font-weight:700;">' + esc(node) + '</div>';
 		html += '<button type="button" class="topology-popup-close" style="background:#1f2937;color:#e5e7eb;border:1px solid #374151;border-radius:6px;padding:4px 8px;cursor:pointer;">Fechar</button>';
 		html += '</div>';
+		if (isUnmanaged) {
+			html += '<div style="margin-bottom:8px; padding:6px 8px; background:#1e293b; border:1px dashed #94a3b8; border-radius:6px; color:#fbbf24;">'
+				+ '⚠ Host descoberto via CDP/LLDP, mas <strong>não cadastrado</strong> no Zabbix.</div>';
+		}
 		html += '<div style="margin-bottom:8px;"><strong>Camada:</strong> ' + esc(tier) + '</div>';
 		html += '<div style="margin-bottom:8px;"><strong>Grau:</strong> ' + degree + '</div>';
 		html += '<div style="margin-bottom:12px;"><strong>Host central:</strong> ' + (isCentral ? 'sim' : 'não') + '</div>';
@@ -350,9 +438,11 @@
 			const status = info ? info.status : null;
 			const statusColor = status === 'up' ? '#22c55e' : status === 'down' ? '#ef4444' : '#94a3b8';
 			const traffic = getTrafficInfo(trafficMap, n.statusHost, n.statusPort);
+			const speed = getSpeedBps(speedMap, n.statusHost, n.statusPort);
 
 			html += '<div style="padding:8px 0; border-bottom:1px solid #1f2937;">';
-			html += '<div style="font-weight:600;">' + esc(n.peer) + '</div>';
+			html += '<div style="font-weight:600;">' + esc(n.peer)
+				+ (unmanagedSet.has(n.peer) ? ' <span style="color:#fbbf24;">(?)</span>' : '') + '</div>';
 			html += '<div style="font-size:12px; color:#cbd5e1;">Protocolo: ' + esc(n.protocol || '-') + '</div>';
 			html += '<div style="font-size:12px; color:#cbd5e1;">Porta: ' + esc(n.port || '-') + '</div>';
 			if (status) {
@@ -366,6 +456,17 @@
 				const outStr = typeof traffic.out === 'number' ? formatBps(traffic.out) : '-';
 				html += '<div style="font-size:12px; color:#a7f3d0; margin-top:2px;">'
 					+ '↓ RX: ' + esc(inStr) + ' &nbsp; ↑ TX: ' + esc(outStr) + '</div>';
+			}
+			if (speed && traffic) {
+				const peak = Math.max(
+					typeof traffic.in === 'number' ? traffic.in : 0,
+					typeof traffic.out === 'number' ? traffic.out : 0
+				);
+				const pct = (peak / speed) * 100;
+				const utilColor = colorForUtilization(pct, utilWarnPct, utilCritPct);
+				html += '<div style="font-size:12px; color:' + utilColor + '; font-weight:600; margin-top:2px;">'
+					+ 'Util: ' + pct.toFixed(1) + '% '
+					+ '<span style="color:#94a3b8; font-weight:400;">(' + esc(formatBps(speed)) + ')</span></div>';
 			}
 			html += '</div>';
 		});
@@ -719,6 +820,9 @@
 			let centralHosts = [];
 			let interfaceStatuses = [];
 			let interfaceTraffic = [];
+			let interfaceSpeed = [];
+			let unmanagedNodes = [];
+			let widgetConfig = {};
 
 			try {
 				links = JSON.parse(atob(rootEl.dataset.links || ''));
@@ -749,8 +853,51 @@
 				interfaceTraffic = [];
 			}
 
+			try {
+				interfaceSpeed = JSON.parse(atob(rootEl.dataset.interfaceSpeed || ''));
+			}
+			catch (e) {
+				interfaceSpeed = [];
+			}
+
+			try {
+				unmanagedNodes = JSON.parse(atob(rootEl.dataset.unmanagedNodes || ''));
+			}
+			catch (e) {
+				unmanagedNodes = [];
+			}
+
+			try {
+				widgetConfig = JSON.parse(atob(rootEl.dataset.widgetConfig || ''));
+			}
+			catch (e) {
+				widgetConfig = {};
+			}
+
+			const showUnmanagedMode = parseInt(widgetConfig.show_unmanaged, 10) || 0; // 0=todos,1=monitorados,2=não-monit
+			const linkColorMode    = parseInt(widgetConfig.link_color_mode, 10) || 0; // 0=status, 1=utilização
+			const utilWarnPct      = parseInt(widgetConfig.util_warn_pct, 10) || 60;
+			const utilCritPct      = parseInt(widgetConfig.util_crit_pct, 10) || 85;
+
+			const unmanagedSet = new Set((unmanagedNodes || []).map((n) => normalizeName(n)));
+
+			// Aplica filtro de exibição (somente monitorados / somente não-monitorados)
+			if (showUnmanagedMode === 1) {
+				links = (links || []).filter((l) =>
+					!unmanagedSet.has(normalizeName(l.source)) &&
+					!unmanagedSet.has(normalizeName(l.target))
+				);
+			}
+			else if (showUnmanagedMode === 2) {
+				links = (links || []).filter((l) =>
+					unmanagedSet.has(normalizeName(l.source)) ||
+					unmanagedSet.has(normalizeName(l.target))
+				);
+			}
+
 			const statusMap = buildStatusMap(interfaceStatuses);
 			const trafficMap = buildTrafficMap(interfaceTraffic);
+			const speedMap = buildSpeedMap(interfaceSpeed);
 			const model = buildModel(links);
 			const preferredAnchors = centralHosts
 				.map((host) => normalizeName(host.normalized || host.name || ''))
@@ -901,19 +1048,39 @@
 						color = '#34d399';
 					}
 
-					// Status: usa membros se houver (cobre tanto link individual quanto agregado),
-					// senão tenta o statusHost/statusPort principal.
+					// Status agregado
 					let aggStatus = aggregateMembersStatus(statusMap, link.members);
 					if (!aggStatus && link.statusHost) {
 						const sInfo = getStatusInfo(statusMap, link.statusHost, link.statusPort);
 						if (sInfo) aggStatus = sInfo.status;
 					}
-					if (aggStatus === 'up') color = '#22c55e';
-					else if (aggStatus === 'down') color = '#ef4444';
+
+					// Cor por status (default) ou por utilização (modo configurado)
+					if (linkColorMode === 1) {
+						const util = aggregateMembersUtilization(trafficMap, speedMap, link.members);
+						if (util) {
+							color = colorForUtilization(util.pct, utilWarnPct, utilCritPct);
+						}
+						else if (aggStatus === 'down') {
+							color = '#64748b'; // cinza para down sem dado de utilização
+						}
+					}
+					else {
+						if (aggStatus === 'up') color = '#22c55e';
+						else if (aggStatus === 'down') color = '#ef4444';
+					}
 
 					const dash = String(link.protocol || '').toUpperCase() === 'LLDP' ? ' stroke-dasharray="6 3" ' : '';
 					const opacity = active ? 0.9 : 0.18;
-					const strokeWidth = active ? 2.6 : 1.2;
+
+					// Espessura: por utilização se modo for utilização e tiver dado;
+					// caso contrário, base + leve destaque quando ativo.
+					let strokeWidth = active ? 2.6 : 1.2;
+					if (linkColorMode === 1) {
+						const util = aggregateMembersUtilization(trafficMap, speedMap, link.members);
+						if (util) strokeWidth = strokeForUtilization(util.pct);
+						if (!active) strokeWidth = Math.max(1.2, strokeWidth * 0.5);
+					}
 
 					const x1 = positions[s].x, y1 = positions[s].y;
 					const x2 = positions[t].x, y2 = positions[t].y;
@@ -946,8 +1113,10 @@
 					const isExpanded = !!expandedState[node];
 					const isSelected = selectedNode === node;
 					const isNeighbor = selectedNode && (model.adjacency[selectedNode] || []).some((n) => n.peer === node);
+					const isUnmanaged = unmanagedSet.has(node);
 
 					let fill = isCentral ? '#2563eb' : '#475569';
+					if (isUnmanaged) fill = '#1f2937';
 					let radius = isCentral ? 30 : 19;
 
 					let nodeOpacity = 1;
@@ -955,19 +1124,28 @@
 
 					let stroke = isCentral ? '#fbbf24' : '#ffffff';
 					let strokeWidth = isCentral ? 3 : 2;
+					let strokeDash = '';
+
+					if (isUnmanaged) {
+						stroke = '#94a3b8';
+						strokeWidth = 2;
+						strokeDash = ' stroke-dasharray="4 3" ';
+					}
 
 					if (isSelected) {
 						stroke = '#facc15';
 						strokeWidth = 5;
+						strokeDash = '';
 					}
 
 					const x = positions[node].x;
 					const y = positions[node].y;
+					const letter = isUnmanaged ? '?' : 'R';
 
-					svg += '<g class="topology-node" data-node="' + esc(node) + '" style="cursor:grab;">';
-					svg += '<circle class="topology-node-circle" cx="' + x + '" cy="' + y + '" r="' + radius + '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + strokeWidth + '" opacity="' + nodeOpacity + '"/>';
-					svg += '<text class="topology-node-letter" x="' + x + '" y="' + (y + 4) + '" fill="#ffffff" font-size="11" font-weight="700" text-anchor="middle" font-family="Arial, sans-serif" opacity="' + nodeOpacity + '">R</text>';
-					svg += '<text class="topology-node-label" data-radius="' + radius + '" x="' + x + '" y="' + (y + radius + 18) + '" fill="#e2e8f0" font-size="11" text-anchor="middle" font-family="Arial, sans-serif" opacity="' + nodeOpacity + '">' + esc(shortName(node, 16)) + '</text>';
+					svg += '<g class="topology-node" data-node="' + esc(node) + '" data-unmanaged="' + (isUnmanaged ? '1' : '0') + '" style="cursor:grab;">';
+					svg += '<circle class="topology-node-circle" cx="' + x + '" cy="' + y + '" r="' + radius + '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + strokeWidth + '"' + strokeDash + ' opacity="' + nodeOpacity + '"/>';
+					svg += '<text class="topology-node-letter" x="' + x + '" y="' + (y + 4) + '" fill="#ffffff" font-size="11" font-weight="700" text-anchor="middle" font-family="Arial, sans-serif" opacity="' + nodeOpacity + '">' + letter + '</text>';
+					svg += '<text class="topology-node-label" data-radius="' + radius + '" x="' + x + '" y="' + (y + radius + 18) + '" fill="' + (isUnmanaged ? '#94a3b8' : '#e2e8f0') + '" font-size="11" text-anchor="middle" font-family="Arial, sans-serif" opacity="' + nodeOpacity + '">' + esc(shortName(node, 16)) + (isUnmanaged ? ' (?)' : '') + '</text>';
 
 					if (isCentral) {
 						const symbol = isExpanded ? '−' : '+';
@@ -979,6 +1157,33 @@
 
 					svg += '</g>';
 				});
+
+				// Legenda discreta no canto inferior direito
+				const legendX = 1800 - 230;
+				const legendY = 1100 - 78;
+				svg += '<g pointer-events="none" font-family="Arial, sans-serif">';
+				svg += '<rect x="' + legendX + '" y="' + legendY + '" width="220" height="68" rx="6" ry="6" '
+					+ 'fill="#0b1220" stroke="#334155" stroke-width="1" opacity="0.9"/>';
+				if (linkColorMode === 1) {
+					svg += '<text x="' + (legendX + 10) + '" y="' + (legendY + 18) + '" fill="#e2e8f0" font-size="11" font-weight="700">Cor por utilização</text>';
+					svg += '<rect x="' + (legendX + 10) + '" y="' + (legendY + 26) + '" width="14" height="6" fill="#22c55e"/>';
+					svg += '<text x="' + (legendX + 30) + '" y="' + (legendY + 32) + '" fill="#cbd5e1" font-size="10">&lt; ' + utilWarnPct + '%</text>';
+					svg += '<rect x="' + (legendX + 90) + '" y="' + (legendY + 26) + '" width="14" height="6" fill="#facc15"/>';
+					svg += '<text x="' + (legendX + 110) + '" y="' + (legendY + 32) + '" fill="#cbd5e1" font-size="10">' + utilWarnPct + '–' + utilCritPct + '%</text>';
+					svg += '<rect x="' + (legendX + 160) + '" y="' + (legendY + 26) + '" width="14" height="6" fill="#ef4444"/>';
+					svg += '<text x="' + (legendX + 180) + '" y="' + (legendY + 32) + '" fill="#cbd5e1" font-size="10">≥ ' + utilCritPct + '%</text>';
+				}
+				else {
+					svg += '<text x="' + (legendX + 10) + '" y="' + (legendY + 18) + '" fill="#e2e8f0" font-size="11" font-weight="700">Cor por status</text>';
+					svg += '<rect x="' + (legendX + 10) + '" y="' + (legendY + 26) + '" width="14" height="6" fill="#22c55e"/>';
+					svg += '<text x="' + (legendX + 30) + '" y="' + (legendY + 32) + '" fill="#cbd5e1" font-size="10">UP</text>';
+					svg += '<rect x="' + (legendX + 70) + '" y="' + (legendY + 26) + '" width="14" height="6" fill="#ef4444"/>';
+					svg += '<text x="' + (legendX + 90) + '" y="' + (legendY + 32) + '" fill="#cbd5e1" font-size="10">DOWN</text>';
+				}
+				svg += '<circle cx="' + (legendX + 18) + '" cy="' + (legendY + 52) + '" r="8" fill="#1f2937" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="3 2"/>';
+				svg += '<text x="' + (legendX + 18) + '" y="' + (legendY + 56) + '" fill="#fbbf24" font-size="9" font-weight="700" text-anchor="middle">?</text>';
+				svg += '<text x="' + (legendX + 32) + '" y="' + (legendY + 56) + '" fill="#cbd5e1" font-size="10">Host não cadastrado no Zabbix</text>';
+				svg += '</g>';
 
 				svg += '</svg>';
 				svg += '</div>';
@@ -1019,6 +1224,8 @@
 						if (t) traffic = { in: typeof t.in === 'number' ? t.in : null, out: typeof t.out === 'number' ? t.out : null };
 					}
 
+					const util = aggregateMembersUtilization(trafficMap, speedMap, link.members);
+
 					const memberCount = (link.members && link.members.length) || 0;
 					const aggregated = memberCount > 1;
 
@@ -1040,6 +1247,14 @@
 					}
 					else {
 						html += '<div style="margin-top:4px; color:#94a3b8;">Sem dados de tráfego</div>';
+					}
+
+					if (util) {
+						const utilColor = colorForUtilization(util.pct, utilWarnPct, utilCritPct);
+						html += '<div style="margin-top:2px; color:' + utilColor + '; font-weight:600;">'
+							+ 'Utilização: ' + util.pct.toFixed(1) + '% '
+							+ '<span style="color:#94a3b8; font-weight:400;">('
+							+ esc(formatBps(util.peakBps)) + ' / ' + esc(formatBps(util.speedBps)) + ')</span></div>';
 					}
 
 					tooltipEl.innerHTML = html;
@@ -1234,7 +1449,11 @@
 						rootEl.dataset.selectedNode = node;
 						scheduleDraw();
 
-						const html = renderPopupContent(node, model, centralHosts, statusMap, trafficMap);
+						const html = renderPopupContent(node, model, centralHosts, statusMap, trafficMap, speedMap, {
+							unmanagedSet: unmanagedSet,
+							utilWarnPct: utilWarnPct,
+							utilCritPct: utilCritPct
+						});
 						showPopup(rootEl, popupEl, html, event.clientX, event.clientY);
 					});
 				});

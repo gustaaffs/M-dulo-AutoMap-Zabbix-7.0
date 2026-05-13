@@ -60,6 +60,15 @@ class WidgetView extends CControllerDashboardWidgetView {
 		$groupids = $this->extractIds($this->fields_values['groupids'] ?? []);
 		$center_hostids = $this->extractIds($this->fields_values['center_hostids'] ?? []);
 
+		$show_unmanaged   = (int) ($this->fields_values['show_unmanaged']   ?? 0);
+		$link_color_mode  = (int) ($this->fields_values['link_color_mode']  ?? 0);
+		$util_warn_pct    = (int) ($this->fields_values['util_warn_pct']    ?? 60);
+		$util_crit_pct    = (int) ($this->fields_values['util_crit_pct']    ?? 85);
+
+		if ($util_warn_pct < 1 || $util_warn_pct > 100) $util_warn_pct = 60;
+		if ($util_crit_pct < 1 || $util_crit_pct > 100) $util_crit_pct = 85;
+		if ($util_crit_pct < $util_warn_pct) $util_crit_pct = $util_warn_pct;
+
 		$selected_group = $groupids ? $groupids[0] : null;
 
 		$response = [
@@ -68,8 +77,16 @@ class WidgetView extends CControllerDashboardWidgetView {
 			'group_name' => '',
 			'unique_links' => [],
 			'central_hosts' => [],
+			'unmanaged_nodes' => [],
 			'interface_status_items' => [],
 			'interface_traffic_items' => [],
+			'interface_speed_items' => [],
+			'config' => [
+				'show_unmanaged'  => $show_unmanaged,
+				'link_color_mode' => $link_color_mode,
+				'util_warn_pct'   => $util_warn_pct,
+				'util_crit_pct'   => $util_crit_pct
+			],
 			'message' => '',
 			'user' => [
 				'debug_mode' => $this->getDebugMode()
@@ -91,8 +108,10 @@ class WidgetView extends CControllerDashboardWidgetView {
 			$response['group_name']             = $cached['group_name'] ?? '';
 			$response['unique_links']           = $cached['unique_links'] ?? [];
 			$response['central_hosts']          = $cached['central_hosts'] ?? [];
+			$response['unmanaged_nodes']        = $cached['unmanaged_nodes'] ?? [];
 			$response['interface_status_items'] = $cached['interface_status_items'] ?? [];
 			$response['interface_traffic_items']= $cached['interface_traffic_items'] ?? [];
+			$response['interface_speed_items']  = $cached['interface_speed_items'] ?? [];
 			$response['message']                = $cached['message'] ?? '';
 			$this->setResponse(new CControllerResponseData($response));
 			return;
@@ -138,14 +157,29 @@ class WidgetView extends CControllerDashboardWidgetView {
 			$hostids[] = $host['hostid'];
 		}
 
+		// Tenta primeiro por tag (component=vizinho) — uso de índice, mais rápido.
+		// Se não vier nada (template sem tag), faz fallback para search por nome.
 		$items = API::Item()->get([
 			'output'    => ['itemid', 'hostid', 'name'],
 			'hostids'   => $hostids,
 			'monitored' => true,
-			'search'    => ['name' => 'Vizinho'],
+			'tags'      => [
+				['tag' => 'component', 'value' => 'vizinho', 'operator' => 1] // 1 = TAG_OPERATOR_EQUAL
+			],
 			'sortfield' => 'name',
 			'sortorder' => 'ASC'
 		]);
+
+		if (!is_array($items) || !$items) {
+			$items = API::Item()->get([
+				'output'    => ['itemid', 'hostid', 'name'],
+				'hostids'   => $hostids,
+				'monitored' => true,
+				'search'    => ['name' => 'Vizinho'],
+				'sortfield' => 'name',
+				'sortorder' => 'ASC'
+			]);
+		}
 
 		if (!is_array($items) || !$items) {
 			$response['message'] = 'Nenhum item "Vizinho CDP" ou "Vizinho LLDP" foi encontrado.';
@@ -238,6 +272,7 @@ class WidgetView extends CControllerDashboardWidgetView {
 		// para que possamos buscar status/tráfego nas portas deles também.
 		$expanded_hostids = $hostids;
 		$expanded_host_map = $host_map;
+		$matched_neighbor_norm = [];
 
 		if ($neighbor_names_norm) {
 			$missing_norm = [];
@@ -248,7 +283,10 @@ class WidgetView extends CControllerDashboardWidgetView {
 			}
 
 			foreach ($neighbor_names_norm as $norm => $raw) {
-				if (!isset($known_norm_set[$norm])) {
+				if (isset($known_norm_set[$norm])) {
+					$matched_neighbor_norm[$norm] = true;
+				}
+				else {
 					$missing_norm[$norm] = $raw;
 				}
 			}
@@ -274,6 +312,14 @@ class WidgetView extends CControllerDashboardWidgetView {
 					foreach ($extra_hosts as $eh) {
 						$norm_h = $this->normalizeNodeName($eh['name']);
 						$norm_t = $this->normalizeNodeName($eh['host']);
+
+						if (isset($missing_norm[$norm_h])) {
+							$matched_neighbor_norm[$norm_h] = true;
+						}
+						if (isset($missing_norm[$norm_t])) {
+							$matched_neighbor_norm[$norm_t] = true;
+						}
+
 						if (isset($missing_norm[$norm_h]) || isset($missing_norm[$norm_t])) {
 							if (!isset($expanded_host_map[$eh['hostid']])) {
 								$expanded_host_map[$eh['hostid']] = $eh['name'];
@@ -285,15 +331,26 @@ class WidgetView extends CControllerDashboardWidgetView {
 			}
 		}
 
+		// Lista de nós descobertos via CDP/LLDP que NÃO existem como host monitorado
+		// (nem no grupo selecionado, nem em qualquer outro grupo do Zabbix).
+		// O frontend usará isto para sinalizar visualmente e filtrar.
+		$unmanaged_nodes = [];
+		foreach ($neighbor_names_norm as $norm => $raw) {
+			if (!isset($matched_neighbor_norm[$norm])) {
+				$unmanaged_nodes[] = $norm;
+			}
+		}
+		$response['unmanaged_nodes'] = array_values(array_unique($unmanaged_nodes));
+
 		$expanded_hostids = array_values(array_unique($expanded_hostids));
 
-		// Interface operational status + bandwidth (porta está no vizinho/target)
+		// Interface operational status + bandwidth + speed (porta está no vizinho/target)
 		$iface_items = API::Item()->get([
 			'output'    => ['itemid', 'hostid', 'name', 'lastvalue', 'units'],
 			'hostids'   => $expanded_hostids,
 			'monitored' => true,
 			'search'    => [
-				'name' => ['Operational status', 'Bits received', 'Bits sent']
+				'name' => ['Operational status', 'Bits received', 'Bits sent', 'Speed']
 			],
 			'searchByAny' => true,
 			'sortfield' => 'name',
@@ -321,6 +378,9 @@ class WidgetView extends CControllerDashboardWidgetView {
 				elseif (stripos($name, 'Bits received') !== false || stripos($name, 'Bits sent') !== false) {
 					$response['interface_traffic_items'][] = $record;
 				}
+				elseif (preg_match('/:\s*Speed\s*$/i', $name)) {
+					$response['interface_speed_items'][] = $record;
+				}
 			}
 		}
 
@@ -328,8 +388,10 @@ class WidgetView extends CControllerDashboardWidgetView {
 			'group_name'              => $response['group_name'],
 			'unique_links'            => $response['unique_links'],
 			'central_hosts'           => $response['central_hosts'],
+			'unmanaged_nodes'         => $response['unmanaged_nodes'],
 			'interface_status_items'  => $response['interface_status_items'],
 			'interface_traffic_items' => $response['interface_traffic_items'],
+			'interface_speed_items'   => $response['interface_speed_items'],
 			'message'                 => $response['message']
 		]);
 
