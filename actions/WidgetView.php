@@ -9,7 +9,7 @@ use CControllerResponseData;
 class WidgetView extends CControllerDashboardWidgetView {
 
 	private const CACHE_TTL_SECONDS = 30;
-	private const CACHE_PREFIX = 'topology_widget_test:v1:';
+	private const CACHE_PREFIX = 'topology_widget_test:v2:';
 
 	private function cacheGet(string $key) {
 		if (function_exists('apcu_fetch')) {
@@ -56,115 +56,19 @@ class WidgetView extends CControllerDashboardWidgetView {
 		return array_values(array_unique($ids));
 	}
 
-	protected function doAction(): void {
-		$groupids = $this->extractIds($this->fields_values['groupids'] ?? []);
-		$center_hostids = $this->extractIds($this->fields_values['center_hostids'] ?? []);
+	/**
+	 * Busca itens "Vizinho CDP/LLDP" para os hostids informados.
+	 * Tenta primeiro por tag (component=vizinho), faz fallback para search por nome.
+	 */
+	private function fetchVizinhoItems(array $hostids): array {
+		if (!$hostids) return [];
 
-		$show_unmanaged   = (int) ($this->fields_values['show_unmanaged']   ?? 0);
-		$link_color_mode  = (int) ($this->fields_values['link_color_mode']  ?? 0);
-		$util_warn_pct    = (int) ($this->fields_values['util_warn_pct']    ?? 60);
-		$util_crit_pct    = (int) ($this->fields_values['util_crit_pct']    ?? 85);
-
-		if ($util_warn_pct < 1 || $util_warn_pct > 100) $util_warn_pct = 60;
-		if ($util_crit_pct < 1 || $util_crit_pct > 100) $util_crit_pct = 85;
-		if ($util_crit_pct < $util_warn_pct) $util_crit_pct = $util_warn_pct;
-
-		$selected_group = $groupids ? $groupids[0] : null;
-
-		$response = [
-			'name' => $this->getInput('name', $this->widget->getDefaultName()),
-			'selected_group' => $selected_group ?? 'nenhum',
-			'group_name' => '',
-			'unique_links' => [],
-			'central_hosts' => [],
-			'unmanaged_nodes' => [],
-			'interface_status_items' => [],
-			'interface_traffic_items' => [],
-			'interface_speed_items' => [],
-			'config' => [
-				'show_unmanaged'  => $show_unmanaged,
-				'link_color_mode' => $link_color_mode,
-				'util_warn_pct'   => $util_warn_pct,
-				'util_crit_pct'   => $util_crit_pct
-			],
-			'message' => '',
-			'user' => [
-				'debug_mode' => $this->getDebugMode()
-			]
-		];
-
-		if ($selected_group === null) {
-			$response['message'] = 'Selecione um grupo no widget.';
-			$this->setResponse(new CControllerResponseData($response));
-			return;
-		}
-
-		// Cache curto (TTL=30s) para reduzir carga na API/DB quando vários
-		// dashboards/abas exibem o mesmo widget. A chave inclui grupo + centrais.
-		$cache_key = $selected_group . ':' . implode(',', $center_hostids);
-		$cached = $this->cacheGet($cache_key);
-
-		if (is_array($cached)) {
-			$response['group_name']             = $cached['group_name'] ?? '';
-			$response['unique_links']           = $cached['unique_links'] ?? [];
-			$response['central_hosts']          = $cached['central_hosts'] ?? [];
-			$response['unmanaged_nodes']        = $cached['unmanaged_nodes'] ?? [];
-			$response['interface_status_items'] = $cached['interface_status_items'] ?? [];
-			$response['interface_traffic_items']= $cached['interface_traffic_items'] ?? [];
-			$response['interface_speed_items']  = $cached['interface_speed_items'] ?? [];
-			$response['message']                = $cached['message'] ?? '';
-			$this->setResponse(new CControllerResponseData($response));
-			return;
-		}
-
-		$groups = API::HostGroup()->get([
-			'output' => ['groupid', 'name'],
-			'groupids' => [$selected_group]
-		]);
-
-		if ($groups) {
-			$response['group_name'] = $groups[0]['name'];
-		}
-		else {
-			$response['group_name'] = 'Grupo ' . $selected_group;
-		}
-
-		$hosts = API::Host()->get([
-			'output' => ['hostid', 'name'],
-			'groupids' => [$selected_group],
-			'monitored_hosts' => true
-		]);
-
-		if (!$hosts) {
-			$response['message'] = 'Nenhum host monitorado encontrado no grupo selecionado.';
-			$this->cacheSet($cache_key, [
-				'group_name' => $response['group_name'],
-				'unique_links' => [],
-				'central_hosts' => [],
-				'interface_status_items' => [],
-				'interface_traffic_items' => [],
-				'message' => $response['message']
-			]);
-			$this->setResponse(new CControllerResponseData($response));
-			return;
-		}
-
-		$host_map = [];
-		$hostids = [];
-
-		foreach ($hosts as $host) {
-			$host_map[$host['hostid']] = $host['name'];
-			$hostids[] = $host['hostid'];
-		}
-
-		// Tenta primeiro por tag (component=vizinho) — uso de índice, mais rápido.
-		// Se não vier nada (template sem tag), faz fallback para search por nome.
 		$items = API::Item()->get([
 			'output'    => ['itemid', 'hostid', 'name'],
 			'hostids'   => $hostids,
 			'monitored' => true,
 			'tags'      => [
-				['tag' => 'component', 'value' => 'vizinho', 'operator' => 1] // 1 = TAG_OPERATOR_EQUAL
+				['tag' => 'component', 'value' => 'vizinho', 'operator' => 1] // TAG_OPERATOR_EQUAL
 			],
 			'sortfield' => 'name',
 			'sortorder' => 'ASC'
@@ -181,205 +85,286 @@ class WidgetView extends CControllerDashboardWidgetView {
 			]);
 		}
 
-		if (!is_array($items) || !$items) {
-			$response['message'] = 'Nenhum item "Vizinho CDP" ou "Vizinho LLDP" foi encontrado.';
-			$this->cacheSet($cache_key, [
-				'group_name' => $response['group_name'],
-				'unique_links' => [],
-				'central_hosts' => [],
-				'interface_status_items' => [],
-				'interface_traffic_items' => [],
-				'message' => $response['message']
-			]);
+		return is_array($items) ? $items : [];
+	}
+
+	/**
+	 * Faz parse de um item "Vizinho CDP|LLDP : <peer> (Porta <porta>)".
+	 * Retorna [protocol, target_raw, port] ou null.
+	 */
+	private function parseVizinhoItem(string $item_name): ?array {
+		if (preg_match('/^Vizinho\s+(CDP|LLDP)\s*:\s*(.+?)\s*\(Porta\s+(.+?)\)\s*$/iu', $item_name, $m)) {
+			return [strtoupper(trim($m[1])), trim($m[2]), trim($m[3])];
+		}
+		if (preg_match('/^Vizinho\s+(CDP|LLDP)\s*:\s*(.+?)\s*$/iu', $item_name, $m)) {
+			return [strtoupper(trim($m[1])), trim($m[2]), ''];
+		}
+		return null;
+	}
+
+	/**
+	 * Resolve nomes normalizados de vizinhos em hostids (entre todos os grupos).
+	 * Retorna [norm => ['hostid'=>..., 'name'=>...]].
+	 */
+	private function resolveNeighborHostsByName(array $names_norm_to_raw): array {
+		if (!$names_norm_to_raw) return [];
+
+		$search_terms = array_values(array_unique(array_merge(
+			array_keys($names_norm_to_raw),
+			array_values($names_norm_to_raw)
+		)));
+
+		$hosts = API::Host()->get([
+			'output' => ['hostid', 'host', 'name'],
+			'search' => [
+				'host' => $search_terms,
+				'name' => $search_terms
+			],
+			'searchByAny' => true,
+			'monitored_hosts' => true
+		]);
+
+		$resolved = [];
+		if (is_array($hosts)) {
+			foreach ($hosts as $h) {
+				$norm_n = $this->normalizeNodeName($h['name']);
+				$norm_t = $this->normalizeNodeName($h['host']);
+				if (isset($names_norm_to_raw[$norm_n]) && !isset($resolved[$norm_n])) {
+					$resolved[$norm_n] = ['hostid' => $h['hostid'], 'name' => $h['name']];
+				}
+				if (isset($names_norm_to_raw[$norm_t]) && !isset($resolved[$norm_t])) {
+					$resolved[$norm_t] = ['hostid' => $h['hostid'], 'name' => $h['name']];
+				}
+			}
+		}
+		return $resolved;
+	}
+
+	protected function doAction(): void {
+		$groupids = $this->extractIds($this->fields_values['groupids'] ?? []);
+
+		$max_levels       = (int) ($this->fields_values['max_levels']       ?? 2);
+		$show_unmanaged   = (int) ($this->fields_values['show_unmanaged']   ?? 0);
+		$util_warn_pct    = (int) ($this->fields_values['util_warn_pct']    ?? 60);
+		$util_crit_pct    = (int) ($this->fields_values['util_crit_pct']    ?? 85);
+
+		if ($max_levels   < 1 || $max_levels   > 6)  $max_levels   = 2;
+		if ($util_warn_pct < 1 || $util_warn_pct > 100) $util_warn_pct = 60;
+		if ($util_crit_pct < 1 || $util_crit_pct > 100) $util_crit_pct = 85;
+		if ($util_crit_pct < $util_warn_pct) $util_crit_pct = $util_warn_pct;
+
+		$selected_group = $groupids ? $groupids[0] : null;
+
+		$response = [
+			'name' => $this->getInput('name', $this->widget->getDefaultName()),
+			'selected_group' => $selected_group ?? 'nenhum',
+			'group_name' => '',
+			'unique_links' => [],
+			'host_levels' => new \stdClass(),
+			'unmanaged_nodes' => [],
+			'interface_status_items' => [],
+			'interface_traffic_items' => [],
+			'interface_speed_items' => [],
+			'config' => [
+				'show_unmanaged' => $show_unmanaged,
+				'util_warn_pct'  => $util_warn_pct,
+				'util_crit_pct'  => $util_crit_pct,
+				'max_levels'     => $max_levels
+			],
+			'message' => '',
+			'user' => [
+				'debug_mode' => $this->getDebugMode()
+			]
+		];
+
+		if ($selected_group === null) {
+			$response['message'] = 'Selecione um grupo no widget.';
 			$this->setResponse(new CControllerResponseData($response));
 			return;
 		}
 
+		$cache_key = $selected_group . ':L' . $max_levels;
+		$cached = $this->cacheGet($cache_key);
+
+		if (is_array($cached)) {
+			foreach ([
+				'group_name','unique_links','host_levels','unmanaged_nodes',
+				'interface_status_items','interface_traffic_items','interface_speed_items','message'
+			] as $k) {
+				if (array_key_exists($k, $cached)) {
+					$response[$k] = $cached[$k];
+				}
+			}
+			$this->setResponse(new CControllerResponseData($response));
+			return;
+		}
+
+		$groups = API::HostGroup()->get([
+			'output' => ['groupid', 'name'],
+			'groupids' => [$selected_group]
+		]);
+		$response['group_name'] = $groups ? $groups[0]['name'] : ('Grupo ' . $selected_group);
+
+		// === NÍVEL 0: hosts monitorados do grupo selecionado ===
+		$lvl0_hosts = API::Host()->get([
+			'output' => ['hostid', 'name'],
+			'groupids' => [$selected_group],
+			'monitored_hosts' => true
+		]);
+
+		if (!$lvl0_hosts) {
+			$response['message'] = 'Nenhum host monitorado encontrado no grupo selecionado.';
+			$this->cacheSet($cache_key, $response);
+			$this->setResponse(new CControllerResponseData($response));
+			return;
+		}
+
+		// host_norm => ['hostid'=>..., 'name'=>..., 'level'=>N]
+		$known_hosts = [];
+		// hostid => name (mapa para anotar hosts em todos os níveis processados)
+		$expanded_host_map = [];
+
+		foreach ($lvl0_hosts as $h) {
+			$norm = $this->normalizeNodeName($h['name']);
+			$known_hosts[$norm] = ['hostid' => $h['hostid'], 'name' => $h['name'], 'level' => 0];
+			$expanded_host_map[$h['hostid']] = $h['name'];
+		}
+
+		// === BFS por níveis ===
 		$unique_map = [];
-		$neighbor_names_norm = [];
+		$all_neighbor_names_norm = []; // norm => raw (para identificar não cadastrados)
+		$current_level_norms = array_keys($known_hosts);
 
-		foreach ($items as $item) {
-			$source_host_raw = $host_map[$item['hostid']] ?? ('HostID ' . $item['hostid']);
-			$item_name = trim($item['name']);
-
-			$protocol = '';
-			$target_raw = '';
-			$port = '';
-
-			if (preg_match('/^Vizinho\s+(CDP|LLDP)\s*:\s*(.+?)\s*\(Porta\s+(.+?)\)\s*$/iu', $item_name, $matches)) {
-				$protocol = strtoupper(trim($matches[1]));
-				$target_raw = trim($matches[2]);
-				$port = trim($matches[3]);
-			}
-			elseif (preg_match('/^Vizinho\s+(CDP|LLDP)\s*:\s*(.+?)\s*$/iu', $item_name, $matches)) {
-				$protocol = strtoupper(trim($matches[1]));
-				$target_raw = trim($matches[2]);
-				$port = '';
-			}
-			else {
-				continue;
+		for ($level = 0; $level < $max_levels && $current_level_norms; $level++) {
+			$level_hostids = [];
+			foreach ($current_level_norms as $norm) {
+				if (!empty($known_hosts[$norm]['hostid'])) {
+					$level_hostids[] = $known_hosts[$norm]['hostid'];
+				}
 			}
 
-			$source_norm = $this->normalizeNodeName($source_host_raw);
-			$target_norm = $this->normalizeNodeName($target_raw);
-
-			if ($source_norm === '' || $target_norm === '') {
-				continue;
+			$items = $this->fetchVizinhoItems($level_hostids);
+			if (!$items) {
+				break;
 			}
 
-			$neighbor_names_norm[$target_norm] = $target_raw;
+			$discovered_norm_to_raw = [];
 
-			$pair = [$source_norm, $target_norm];
-			sort($pair, SORT_STRING);
+			foreach ($items as $item) {
+				$source_raw = $expanded_host_map[$item['hostid']] ?? ('HostID ' . $item['hostid']);
+				$parsed = $this->parseVizinhoItem(trim($item['name']));
+				if (!$parsed) continue;
+				[$protocol, $target_raw, $port] = $parsed;
 
-			$key = implode('|', $pair) . '|' . $protocol . '|' . $port;
+				$source_norm = $this->normalizeNodeName($source_raw);
+				$target_norm = $this->normalizeNodeName($target_raw);
 
-			if (!isset($unique_map[$key])) {
-				$unique_map[$key] = [
-					'source' => $source_norm,
-					'target' => $target_norm,
-					'protocol' => $protocol,
-					'port' => $port,
-					'raw_item' => $item_name
-				];
+				if ($source_norm === '' || $target_norm === '') continue;
+
+				$all_neighbor_names_norm[$target_norm] = $target_raw;
+
+				if (!isset($known_hosts[$target_norm])) {
+					$discovered_norm_to_raw[$target_norm] = $target_raw;
+				}
+
+				$pair = [$source_norm, $target_norm];
+				sort($pair, SORT_STRING);
+				$key = implode('|', $pair) . '|' . $protocol . '|' . $port;
+
+				if (!isset($unique_map[$key])) {
+					$unique_map[$key] = [
+						'source'   => $source_norm,
+						'target'   => $target_norm,
+						'protocol' => $protocol,
+						'port'     => $port,
+						'raw_item' => $item['name']
+					];
+				}
 			}
+
+			// Resolve hostids dos vizinhos descobertos neste passo
+			$next_level_norms = [];
+			if ($discovered_norm_to_raw) {
+				$resolved = $this->resolveNeighborHostsByName($discovered_norm_to_raw);
+				foreach ($discovered_norm_to_raw as $norm => $raw) {
+					if (isset($resolved[$norm])) {
+						$known_hosts[$norm] = [
+							'hostid' => $resolved[$norm]['hostid'],
+							'name'   => $resolved[$norm]['name'],
+							'level'  => $level + 1
+						];
+						$expanded_host_map[$resolved[$norm]['hostid']] = $resolved[$norm]['name'];
+						$next_level_norms[] = $norm;
+					}
+					else {
+						// Vizinho não cadastrado — registra o nível mas sem hostid
+						$known_hosts[$norm] = ['hostid' => null, 'name' => $raw, 'level' => $level + 1];
+					}
+				}
+			}
+
+			$current_level_norms = $next_level_norms;
 		}
 
 		$response['unique_links'] = array_values($unique_map);
 
-		if ($center_hostids) {
-			$central_rows = API::Host()->get([
-				'output' => ['hostid', 'name'],
-				'hostids' => $center_hostids
-			]);
-
-			if (is_array($central_rows)) {
-				foreach ($central_rows as $row) {
-					$response['central_hosts'][] = [
-						'hostid' => $row['hostid'],
-						'name' => $row['name'],
-						'normalized' => $this->normalizeNodeName($row['name'])
-					];
-				}
-			}
+		// host_levels: nome_normalizado => nível
+		$host_levels = [];
+		foreach ($known_hosts as $norm => $info) {
+			$host_levels[$norm] = $info['level'];
 		}
+		$response['host_levels'] = $host_levels;
 
 		if (!$response['unique_links']) {
 			$response['message'] = 'Os itens foram encontrados, mas nenhum link único foi gerado.';
 		}
 
-		// Resolve hostids dos vizinhos (target) que possivelmente estão fora do grupo
-		// para que possamos buscar status/tráfego nas portas deles também.
-		$expanded_hostids = $hostids;
-		$expanded_host_map = $host_map;
-		$matched_neighbor_norm = [];
-
-		if ($neighbor_names_norm) {
-			$missing_norm = [];
-			$known_norm_set = [];
-
-			foreach ($host_map as $hname) {
-				$known_norm_set[$this->normalizeNodeName($hname)] = true;
-			}
-
-			foreach ($neighbor_names_norm as $norm => $raw) {
-				if (isset($known_norm_set[$norm])) {
-					$matched_neighbor_norm[$norm] = true;
-				}
-				else {
-					$missing_norm[$norm] = $raw;
-				}
-			}
-
-			if ($missing_norm) {
-				// Tenta buscar por host (technical name) e name (visible name)
-				$search_terms = array_values(array_unique(array_merge(
-					array_keys($missing_norm),
-					array_values($missing_norm)
-				)));
-
-				$extra_hosts = API::Host()->get([
-					'output' => ['hostid', 'host', 'name'],
-					'search' => [
-						'host' => $search_terms,
-						'name' => $search_terms
-					],
-					'searchByAny' => true,
-					'monitored_hosts' => true
-				]);
-
-				if (is_array($extra_hosts)) {
-					foreach ($extra_hosts as $eh) {
-						$norm_h = $this->normalizeNodeName($eh['name']);
-						$norm_t = $this->normalizeNodeName($eh['host']);
-
-						if (isset($missing_norm[$norm_h])) {
-							$matched_neighbor_norm[$norm_h] = true;
-						}
-						if (isset($missing_norm[$norm_t])) {
-							$matched_neighbor_norm[$norm_t] = true;
-						}
-
-						if (isset($missing_norm[$norm_h]) || isset($missing_norm[$norm_t])) {
-							if (!isset($expanded_host_map[$eh['hostid']])) {
-								$expanded_host_map[$eh['hostid']] = $eh['name'];
-								$expanded_hostids[] = $eh['hostid'];
-							}
-						}
-					}
-				}
-			}
-		}
-
-		// Lista de nós descobertos via CDP/LLDP que NÃO existem como host monitorado
-		// (nem no grupo selecionado, nem em qualquer outro grupo do Zabbix).
-		// O frontend usará isto para sinalizar visualmente e filtrar.
+		// Hosts não cadastrados (descobertos por CDP/LLDP mas sem hostid resolvido)
 		$unmanaged_nodes = [];
-		foreach ($neighbor_names_norm as $norm => $raw) {
-			if (!isset($matched_neighbor_norm[$norm])) {
+		foreach ($all_neighbor_names_norm as $norm => $raw) {
+			if (isset($known_hosts[$norm]) && empty($known_hosts[$norm]['hostid'])) {
 				$unmanaged_nodes[] = $norm;
 			}
 		}
 		$response['unmanaged_nodes'] = array_values(array_unique($unmanaged_nodes));
 
-		$expanded_hostids = array_values(array_unique($expanded_hostids));
+		// === Interface operational status + bandwidth + speed ===
+		$expanded_hostids = array_values(array_unique(array_keys($expanded_host_map)));
+		if ($expanded_hostids) {
+			$iface_items = API::Item()->get([
+				'output'    => ['itemid', 'hostid', 'name', 'lastvalue', 'units'],
+				'hostids'   => $expanded_hostids,
+				'monitored' => true,
+				'search'    => [
+					'name' => ['Operational status', 'Bits received', 'Bits sent', 'Speed']
+				],
+				'searchByAny' => true,
+				'sortfield' => 'name',
+				'sortorder' => 'ASC'
+			]);
 
-		// Interface operational status + bandwidth + speed (porta está no vizinho/target)
-		$iface_items = API::Item()->get([
-			'output'    => ['itemid', 'hostid', 'name', 'lastvalue', 'units'],
-			'hostids'   => $expanded_hostids,
-			'monitored' => true,
-			'search'    => [
-				'name' => ['Operational status', 'Bits received', 'Bits sent', 'Speed']
-			],
-			'searchByAny' => true,
-			'sortfield' => 'name',
-			'sortorder' => 'ASC'
-		]);
+			if (is_array($iface_items)) {
+				foreach ($iface_items as $item) {
+					$name = trim($item['name']);
+					if (stripos($name, 'Interface ') !== 0) continue;
 
-		if (is_array($iface_items)) {
-			foreach ($iface_items as $item) {
-				$name = trim($item['name']);
-				if (stripos($name, 'Interface ') !== 0) {
-					continue;
-				}
+					$host_label = $expanded_host_map[$item['hostid']] ?? ('Host_' . $item['hostid']);
+					$record = [
+						'host'  => $host_label,
+						'name'  => $name,
+						'value' => (string) $item['lastvalue'],
+						'units' => (string) ($item['units'] ?? '')
+					];
 
-				$host_label = $expanded_host_map[$item['hostid']] ?? ('Host_' . $item['hostid']);
-				$record = [
-					'host'  => $host_label,
-					'name'  => $name,
-					'value' => (string) $item['lastvalue'],
-					'units' => (string) ($item['units'] ?? '')
-				];
-
-				if (stripos($name, 'Operational status') !== false) {
-					$response['interface_status_items'][] = $record;
-				}
-				elseif (stripos($name, 'Bits received') !== false || stripos($name, 'Bits sent') !== false) {
-					$response['interface_traffic_items'][] = $record;
-				}
-				elseif (preg_match('/:\s*Speed\s*$/i', $name)) {
-					$response['interface_speed_items'][] = $record;
+					if (stripos($name, 'Operational status') !== false) {
+						$response['interface_status_items'][] = $record;
+					}
+					elseif (stripos($name, 'Bits received') !== false || stripos($name, 'Bits sent') !== false) {
+						$response['interface_traffic_items'][] = $record;
+					}
+					elseif (preg_match('/:\s*Speed\s*$/i', $name)) {
+						$response['interface_speed_items'][] = $record;
+					}
 				}
 			}
 		}
@@ -387,7 +372,7 @@ class WidgetView extends CControllerDashboardWidgetView {
 		$this->cacheSet($cache_key, [
 			'group_name'              => $response['group_name'],
 			'unique_links'            => $response['unique_links'],
-			'central_hosts'           => $response['central_hosts'],
+			'host_levels'             => $response['host_levels'],
 			'unmanaged_nodes'         => $response['unmanaged_nodes'],
 			'interface_status_items'  => $response['interface_status_items'],
 			'interface_traffic_items' => $response['interface_traffic_items'],

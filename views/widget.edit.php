@@ -10,7 +10,7 @@
 		new CWidgetFieldMultiSelectGroupView($data['fields']['groupids'])
 	)
 	->addField(
-		new CWidgetFieldMultiSelectHostView($data['fields']['center_hostids'])
+		new CWidgetFieldIntegerBoxView($data['fields']['max_levels'])
 	)
 	->addField(
 		new CWidgetFieldRadioButtonListView($data['fields']['show_unmanaged'])

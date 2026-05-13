@@ -405,10 +405,12 @@
 		};
 	}
 
-	function renderPopupContent(node, model, centralHosts, statusMap, trafficMap, speedMap, opts) {
+	function renderPopupContent(node, model, hostLevels, statusMap, trafficMap, speedMap, opts) {
 		const neighbors = (model.adjacency[node] || []).slice().sort((a, b) => naturalCompare(a.peer, b.peer));
 		const degree = model.degreeMap[node] || 0;
-		const isCentral = (centralHosts || []).some((h) => normalizeName(h.normalized || h.name || '') === node);
+		const level = (hostLevels && Object.prototype.hasOwnProperty.call(hostLevels, node))
+			? hostLevels[node]
+			: null;
 		opts = opts || {};
 		const unmanagedSet = opts.unmanagedSet || new Set();
 		const utilWarnPct = opts.utilWarnPct || 60;
@@ -430,7 +432,9 @@
 		}
 		html += '<div style="margin-bottom:8px;"><strong>Camada:</strong> ' + esc(tier) + '</div>';
 		html += '<div style="margin-bottom:8px;"><strong>Grau:</strong> ' + degree + '</div>';
-		html += '<div style="margin-bottom:12px;"><strong>Host central:</strong> ' + (isCentral ? 'sim' : 'não') + '</div>';
+		html += '<div style="margin-bottom:12px;"><strong>Nível:</strong> '
+			+ (level === null ? '—' : ('N' + level + (level === 0 ? ' (origem)' : '')))
+			+ '</div>';
 		html += '<div style="font-size:14px; font-weight:700; margin-bottom:8px;">Conexões</div>';
 		html += '<div style="max-height:280px; overflow:auto; border-top:1px solid #1f2937; padding-top:8px;">';
 
@@ -819,7 +823,7 @@
 			rootEl.dataset.initialized = '1';
 
 			let links = [];
-			let centralHosts = [];
+			let hostLevels = {};
 			let interfaceStatuses = [];
 			let interfaceTraffic = [];
 			let interfaceSpeed = [];
@@ -835,10 +839,13 @@
 			}
 
 			try {
-				centralHosts = JSON.parse(atob(rootEl.dataset.centralHosts || ''));
+				const raw = JSON.parse(atob(rootEl.dataset.hostLevels || ''));
+				if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+					hostLevels = raw;
+				}
 			}
 			catch (e) {
-				centralHosts = [];
+				hostLevels = {};
 			}
 
 			try {
@@ -900,11 +907,16 @@
 			const trafficMap = buildTrafficMap(interfaceTraffic);
 			const speedMap = buildSpeedMap(interfaceSpeed);
 			const model = buildModel(links);
-			const preferredAnchors = centralHosts
-				.map((host) => normalizeName(host.normalized || host.name || ''))
-				.filter((name, index, arr) => name && arr.indexOf(name) === index);
 
-			const anchors = preferredAnchors.length ? preferredAnchors : model.nodes.filter((n) => (model.degreeMap[n] || 0) >= 4);
+			// Hosts do grupo selecionado = nível 0 → âncoras do layout.
+			// Mantém apenas os que aparecem no grafo (em algum link visível).
+			const nodesInModel = new Set(model.nodes);
+			const lvl0Anchors = Object.keys(hostLevels)
+				.filter((n) => hostLevels[n] === 0 && nodesInModel.has(n));
+
+			const anchors = lvl0Anchors.length
+				? lvl0Anchors
+				: model.nodes.filter((n) => (model.degreeMap[n] || 0) >= 4);
 			const storageKey = getStorageKey(rootEl, anchors);
 			const savedPositions = loadSavedPositions(storageKey);
 			const expandedState = loadExpandedState(storageKey);
@@ -1150,9 +1162,23 @@
 					const isSelected = selectedNode === node;
 					const isNeighbor = selectedNode && (model.adjacency[selectedNode] || []).some((n) => n.peer === node);
 					const isUnmanaged = unmanagedSet.has(node);
+					const level = (hostLevels && Object.prototype.hasOwnProperty.call(hostLevels, node))
+						? hostLevels[node] : null;
 
-					let fill = isCentral ? '#2563eb' : '#475569';
+					// Cor de preenchimento base por nível (origem mais saturada, vai esmaecendo)
+					const levelFills = ['#2563eb', '#0891b2', '#7c3aed', '#475569', '#334155', '#1e293b'];
+					let fill;
+					if (isCentral) {
+						fill = levelFills[0];
+					}
+					else if (level !== null && level >= 1) {
+						fill = levelFills[Math.min(level, levelFills.length - 1)];
+					}
+					else {
+						fill = '#475569';
+					}
 					if (isUnmanaged) fill = '#1f2937';
+
 					let radius = isCentral ? 30 : 19;
 
 					let nodeOpacity = 1;
@@ -1182,6 +1208,16 @@
 					svg += '<circle class="topology-node-circle" cx="' + x + '" cy="' + y + '" r="' + radius + '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + strokeWidth + '"' + strokeDash + ' opacity="' + nodeOpacity + '"/>';
 					svg += '<text class="topology-node-letter" x="' + x + '" y="' + (y + 4) + '" fill="#ffffff" font-size="11" font-weight="700" text-anchor="middle" font-family="Arial, sans-serif" opacity="' + nodeOpacity + '">' + letter + '</text>';
 					svg += '<text class="topology-node-label" data-radius="' + radius + '" x="' + x + '" y="' + (y + radius + 18) + '" fill="' + (isUnmanaged ? '#94a3b8' : '#e2e8f0') + '" font-size="11" text-anchor="middle" font-family="Arial, sans-serif" opacity="' + nodeOpacity + '">' + esc(shortName(node, 16)) + (isUnmanaged ? ' (?)' : '') + '</text>';
+
+					// Badge do nível (canto superior esquerdo do nó)
+					if (level !== null) {
+						const bx = x - radius + 2;
+						const by = y - radius + 2;
+						svg += '<g class="topology-node-level" pointer-events="none" opacity="' + nodeOpacity + '">';
+						svg += '<circle cx="' + bx + '" cy="' + by + '" r="9" fill="#0b1220" stroke="#94a3b8" stroke-width="1"/>';
+						svg += '<text x="' + bx + '" y="' + (by + 3) + '" fill="#fde68a" font-size="9" font-weight="700" text-anchor="middle" font-family="Arial, sans-serif">N' + level + '</text>';
+						svg += '</g>';
+					}
 
 					if (isCentral) {
 						const symbol = isExpanded ? '−' : '+';
@@ -1558,7 +1594,7 @@
 						rootEl.dataset.selectedNode = node;
 						scheduleDraw();
 
-						const html = renderPopupContent(node, model, centralHosts, statusMap, trafficMap, speedMap, {
+						const html = renderPopupContent(node, model, hostLevels, statusMap, trafficMap, speedMap, {
 							unmanagedSet: unmanagedSet,
 							utilWarnPct: utilWarnPct,
 							utilCritPct: utilCritPct

@@ -4,7 +4,6 @@ namespace Modules\TopologyWidgetTest\Includes;
 
 use Zabbix\Widgets\CWidgetForm;
 use Zabbix\Widgets\Fields\CWidgetFieldMultiSelectGroup;
-use Zabbix\Widgets\Fields\CWidgetFieldMultiSelectHost;
 use Zabbix\Widgets\Fields\CWidgetFieldRadioButtonList;
 use Zabbix\Widgets\Fields\CWidgetFieldIntegerBox;
 
@@ -20,7 +19,8 @@ class WidgetForm extends CWidgetForm {
 				new CWidgetFieldMultiSelectGroup('groupids', _('Host groups'))
 			)
 			->addField(
-				new CWidgetFieldMultiSelectHost('center_hostids', _('Hosts centrais'))
+				(new CWidgetFieldIntegerBox('max_levels', _('Níveis de descoberta'), 1, 6))
+					->setDefault(2)
 			)
 			->addField(
 				(new CWidgetFieldRadioButtonList('show_unmanaged', _('Exibir hosts'), [

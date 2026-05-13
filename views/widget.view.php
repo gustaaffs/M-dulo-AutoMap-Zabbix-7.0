@@ -18,8 +18,8 @@ if (!empty($data['message'])) {
 $links_json = json_encode($data['unique_links'] ?? [], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 $links_b64 = base64_encode($links_json);
 
-$central_json = json_encode($data['central_hosts'] ?? [], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-$central_b64 = base64_encode($central_json);
+$levels_json = json_encode($data['host_levels'] ?? [], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+$levels_b64 = base64_encode($levels_json);
 
 $status_json = json_encode($data['interface_status_items'] ?? [], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 $status_b64 = base64_encode($status_json);
@@ -39,7 +39,7 @@ $config_b64 = base64_encode($config_json);
 $root = new CDiv();
 $root->addClass('topology-test-widget');
 $root->setAttribute('data-links', $links_b64);
-$root->setAttribute('data-central-hosts', $central_b64);
+$root->setAttribute('data-host-levels', $levels_b64);
 $root->setAttribute('data-interface-statuses', $status_b64);
 $root->setAttribute('data-interface-traffic', $traffic_b64);
 $root->setAttribute('data-interface-speed', $speed_b64);
