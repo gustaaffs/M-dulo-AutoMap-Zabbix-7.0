@@ -47,11 +47,11 @@ $root->setAttribute('data-unmanaged-nodes', $unmanaged_b64);
 $root->setAttribute('data-widget-config', $config_b64);
 $root->setAttribute('data-group-name', (string) ($data['group_name'] ?? ''));
 $root->setAttribute('data-group-id', (string) ($data['selected_group'] ?? ''));
-$root->setAttribute('style', 'position:relative; width:100%; min-height:860px; background:#0f172a; border:1px solid #1e293b; border-radius:10px; overflow:hidden;');
+$root->setAttribute('style', 'position:relative; width:100%; height:100%; min-height:520px; background:#0f172a; border:1px solid #1e293b; border-radius:10px; overflow:hidden; box-sizing:border-box;');
 
 $graph = new CDiv();
 $graph->addClass('topology-test-graph');
-$graph->setAttribute('style', 'width:100%; min-height:860px; background:#0f172a; overflow:auto;');
+$graph->setAttribute('style', 'position:absolute; inset:0; width:100%; height:100%; background:#0f172a; overflow:hidden;');
 
 $popup = new CDiv();
 $popup->addClass('topology-test-popup');
@@ -61,9 +61,15 @@ $focus_btn = new CDiv('Limpar foco');
 $focus_btn->addClass('topology-clear-focus-btn');
 $focus_btn->setAttribute('style', 'position:absolute; top:12px; right:12px; z-index:25; display:none; padding:8px 12px; border-radius:8px; background:#111827; color:#e5e7eb; border:1px solid #374151; cursor:pointer; user-select:none;');
 
+$reset_btn = new CDiv('↺ Resetar');
+$reset_btn->addClass('topology-reset-layout-btn');
+$reset_btn->setAttribute('title', _('Resetar layout (posições e zoom) deste widget'));
+$reset_btn->setAttribute('style', 'position:absolute; top:12px; left:12px; z-index:25; padding:6px 10px; border-radius:8px; background:#111827; color:#e5e7eb; border:1px solid #374151; cursor:pointer; user-select:none; font-size:12px;');
+
 $root->addItem($graph);
 $root->addItem($popup);
 $root->addItem($focus_btn);
+$root->addItem($reset_btn);
 
 $widget->addItem($root);
 $widget->show();

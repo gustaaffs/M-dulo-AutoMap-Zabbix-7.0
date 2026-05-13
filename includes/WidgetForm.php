@@ -14,9 +14,6 @@ class WidgetForm extends CWidgetForm {
 	public const SHOW_MANAGED_ONLY   = 1;
 	public const SHOW_UNMANAGED_ONLY = 2;
 
-	public const COLOR_MODE_STATUS      = 0;
-	public const COLOR_MODE_UTILIZATION = 1;
-
 	public function addFields(): self {
 		return $this
 			->addField(
@@ -31,12 +28,6 @@ class WidgetForm extends CWidgetForm {
 					self::SHOW_MANAGED_ONLY    => _('Apenas monitorados'),
 					self::SHOW_UNMANAGED_ONLY  => _('Apenas não monitorados')
 				]))->setDefault(self::SHOW_ALL)
-			)
-			->addField(
-				(new CWidgetFieldRadioButtonList('link_color_mode', _('Cor das linhas'), [
-					self::COLOR_MODE_STATUS      => _('Por status (UP/DOWN)'),
-					self::COLOR_MODE_UTILIZATION => _('Por utilização (%)')
-				]))->setDefault(self::COLOR_MODE_STATUS)
 			)
 			->addField(
 				(new CWidgetFieldIntegerBox('util_warn_pct', _('Limite amarelo (%)'), 1, 100))

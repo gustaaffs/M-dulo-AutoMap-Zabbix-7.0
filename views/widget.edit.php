@@ -16,9 +16,6 @@
 		new CWidgetFieldRadioButtonListView($data['fields']['show_unmanaged'])
 	)
 	->addField(
-		new CWidgetFieldRadioButtonListView($data['fields']['link_color_mode'])
-	)
-	->addField(
 		new CWidgetFieldIntegerBoxView($data['fields']['util_warn_pct'])
 	)
 	->addField(

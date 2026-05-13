@@ -395,12 +395,13 @@
 		const rect = svgEl.getBoundingClientRect();
 		const viewBox = svgEl.viewBox.baseVal;
 
-		const scaleX = viewBox.width / rect.width;
-		const scaleY = viewBox.height / rect.height;
+		// preserveAspectRatio="xMidYMid meet": escala uniforme — usar a maior das duas
+		// para que dx/dy em pixels mapeiem para a mesma distância em coords SVG.
+		const scale = Math.max(viewBox.width / rect.width, viewBox.height / rect.height);
 
 		return {
-			dx: (currentClientX - startClientX) * scaleX * DRAG_GAIN,
-			dy: (currentClientY - startClientY) * scaleY * DRAG_GAIN
+			dx: (currentClientX - startClientX) * scale * DRAG_GAIN,
+			dy: (currentClientY - startClientY) * scale * DRAG_GAIN
 		};
 	}
 
@@ -811,6 +812,7 @@
 			const graphEl = rootEl.querySelector('.topology-test-graph');
 			const popupEl = rootEl.querySelector('.topology-test-popup');
 			const clearFocusBtn = rootEl.querySelector('.topology-clear-focus-btn');
+			const resetLayoutBtn = rootEl.querySelector('.topology-reset-layout-btn');
 
 			if (!graphEl || !popupEl || !clearFocusBtn) return;
 
@@ -875,7 +877,6 @@
 			}
 
 			const showUnmanagedMode = parseInt(widgetConfig.show_unmanaged, 10) || 0; // 0=todos,1=monitorados,2=não-monit
-			const linkColorMode    = parseInt(widgetConfig.link_color_mode, 10) || 0; // 0=status, 1=utilização
 			const utilWarnPct      = parseInt(widgetConfig.util_warn_pct, 10) || 60;
 			const utilCritPct      = parseInt(widgetConfig.util_crit_pct, 10) || 85;
 
@@ -913,6 +914,32 @@
 			let suppressClickUntil = 0;
 			let framePending = false;
 			let dragState = null;
+
+			// Estado do viewBox (pan & zoom). Persistido por widget/grupo.
+			const VIEW_W = 1800, VIEW_H = 1100;
+			const viewKey = storageKey + ':viewbox';
+			let viewBox = (function () {
+				try {
+					const raw = localStorage.getItem(viewKey);
+					if (raw) {
+						const parsed = JSON.parse(raw);
+						if (parsed && typeof parsed.x === 'number') return parsed;
+					}
+				}
+				catch (e) {}
+				return { x: 0, y: 0, w: VIEW_W, h: VIEW_H };
+			})();
+
+			function saveViewBox() {
+				try { localStorage.setItem(viewKey, JSON.stringify(viewBox)); } catch (e) {}
+			}
+
+			function setSvgViewBox() {
+				const svgEl = graphEl.querySelector('svg');
+				if (svgEl) {
+					svgEl.setAttribute('viewBox', viewBox.x + ' ' + viewBox.y + ' ' + viewBox.w + ' ' + viewBox.h);
+				}
+			}
 
 			anchors.forEach((a) => {
 				if (typeof expandedState[a] === 'undefined') expandedState[a] = false;
@@ -1032,9 +1059,11 @@
 				clearFocusBtn.style.display = selectedNode ? 'block' : 'none';
 
 				let svg = '';
-				svg += '<div style="width:100%; height:100%; overflow:auto;">';
-				svg += '<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1100" viewBox="0 0 1800 1100" style="display:block;">';
-				svg += '<rect x="0" y="0" width="1800" height="1100" fill="#0f172a"/>';
+				svg += '<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%" '
+					+ 'viewBox="' + viewBox.x + ' ' + viewBox.y + ' ' + viewBox.w + ' ' + viewBox.h + '" '
+					+ 'preserveAspectRatio="xMidYMid meet" '
+					+ 'style="display:block; width:100%; height:100%; user-select:none;">';
+				svg += '<rect class="topology-bg" x="-100000" y="-100000" width="200000" height="200000" fill="#0f172a" pointer-events="all"/>';
 
 				visible.links.forEach((link, linkIdx) => {
 					const s = link.source;
@@ -1043,42 +1072,49 @@
 					if (!positions[s] || !positions[t]) return;
 
 					const active = !selectedNode || s === selectedNode || t === selectedNode;
-					let color = '#60a5fa';
-					if (String(link.protocol || '').toUpperCase() === 'LLDP') {
-						color = '#34d399';
-					}
 
-					// Status agregado
+					// Status agregado (UP / DOWN / null)
 					let aggStatus = aggregateMembersStatus(statusMap, link.members);
 					if (!aggStatus && link.statusHost) {
 						const sInfo = getStatusInfo(statusMap, link.statusHost, link.statusPort);
 						if (sInfo) aggStatus = sInfo.status;
 					}
 
-					// Cor por status (default) ou por utilização (modo configurado)
-					if (linkColorMode === 1) {
-						const util = aggregateMembersUtilization(trafficMap, speedMap, link.members);
+					// Utilização agregada (worst case entre membros)
+					const util = aggregateMembersUtilization(trafficMap, speedMap, link.members);
+
+					// Lógica COMBINADA de cor:
+					//   DOWN  → vermelho TRACEJADO (perda total da porta)
+					//   UP    → cor por utilização (verde / amarelo / vermelho conforme thresholds)
+					//   demais → cor padrão por protocolo (CDP=azul, LLDP=verde-água tracejado)
+					let color = '#60a5fa';                                             // CDP padrão
+					let dashAttr = '';
+					if (String(link.protocol || '').toUpperCase() === 'LLDP') {
+						color = '#34d399';
+						dashAttr = ' stroke-dasharray="6 3" ';
+					}
+
+					if (aggStatus === 'down') {
+						color = '#ef4444';
+						dashAttr = ' stroke-dasharray="8 4" ';
+					}
+					else if (aggStatus === 'up') {
 						if (util) {
 							color = colorForUtilization(util.pct, utilWarnPct, utilCritPct);
 						}
-						else if (aggStatus === 'down') {
-							color = '#64748b'; // cinza para down sem dado de utilização
+						else {
+							color = '#22c55e';
 						}
-					}
-					else {
-						if (aggStatus === 'up') color = '#22c55e';
-						else if (aggStatus === 'down') color = '#ef4444';
+						// Em UP, sobrescreve dash do LLDP por linha sólida (cor já carrega o estado)
+						dashAttr = '';
 					}
 
-					const dash = String(link.protocol || '').toUpperCase() === 'LLDP' ? ' stroke-dasharray="6 3" ' : '';
-					const opacity = active ? 0.9 : 0.18;
+					const opacity = active ? 0.92 : 0.2;
 
-					// Espessura: por utilização se modo for utilização e tiver dado;
-					// caso contrário, base + leve destaque quando ativo.
+					// Espessura: base + leve aumento conforme utilização (escala log).
 					let strokeWidth = active ? 2.6 : 1.2;
-					if (linkColorMode === 1) {
-						const util = aggregateMembersUtilization(trafficMap, speedMap, link.members);
-						if (util) strokeWidth = strokeForUtilization(util.pct);
+					if (util) {
+						strokeWidth = strokeForUtilization(util.pct);
 						if (!active) strokeWidth = Math.max(1.2, strokeWidth * 0.5);
 					}
 
@@ -1093,7 +1129,7 @@
 						+ 'stroke="' + color + '" '
 						+ 'stroke-width="' + strokeWidth + '" '
 						+ 'opacity="' + opacity + '" '
-						+ dash
+						+ dashAttr
 						+ 'pointer-events="none" />';
 
 					// Hit-line invisível (mais larga) para facilitar o hover
@@ -1159,39 +1195,112 @@
 				});
 
 				// Legenda discreta no canto inferior direito
-				const legendX = 1800 - 230;
-				const legendY = 1100 - 78;
-				svg += '<g pointer-events="none" font-family="Arial, sans-serif">';
-				svg += '<rect x="' + legendX + '" y="' + legendY + '" width="220" height="68" rx="6" ry="6" '
-					+ 'fill="#0b1220" stroke="#334155" stroke-width="1" opacity="0.9"/>';
-				if (linkColorMode === 1) {
-					svg += '<text x="' + (legendX + 10) + '" y="' + (legendY + 18) + '" fill="#e2e8f0" font-size="11" font-weight="700">Cor por utilização</text>';
-					svg += '<rect x="' + (legendX + 10) + '" y="' + (legendY + 26) + '" width="14" height="6" fill="#22c55e"/>';
-					svg += '<text x="' + (legendX + 30) + '" y="' + (legendY + 32) + '" fill="#cbd5e1" font-size="10">&lt; ' + utilWarnPct + '%</text>';
-					svg += '<rect x="' + (legendX + 90) + '" y="' + (legendY + 26) + '" width="14" height="6" fill="#facc15"/>';
-					svg += '<text x="' + (legendX + 110) + '" y="' + (legendY + 32) + '" fill="#cbd5e1" font-size="10">' + utilWarnPct + '–' + utilCritPct + '%</text>';
-					svg += '<rect x="' + (legendX + 160) + '" y="' + (legendY + 26) + '" width="14" height="6" fill="#ef4444"/>';
-					svg += '<text x="' + (legendX + 180) + '" y="' + (legendY + 32) + '" fill="#cbd5e1" font-size="10">≥ ' + utilCritPct + '%</text>';
-				}
-				else {
-					svg += '<text x="' + (legendX + 10) + '" y="' + (legendY + 18) + '" fill="#e2e8f0" font-size="11" font-weight="700">Cor por status</text>';
-					svg += '<rect x="' + (legendX + 10) + '" y="' + (legendY + 26) + '" width="14" height="6" fill="#22c55e"/>';
-					svg += '<text x="' + (legendX + 30) + '" y="' + (legendY + 32) + '" fill="#cbd5e1" font-size="10">UP</text>';
-					svg += '<rect x="' + (legendX + 70) + '" y="' + (legendY + 26) + '" width="14" height="6" fill="#ef4444"/>';
-					svg += '<text x="' + (legendX + 90) + '" y="' + (legendY + 32) + '" fill="#cbd5e1" font-size="10">DOWN</text>';
-				}
-				svg += '<circle cx="' + (legendX + 18) + '" cy="' + (legendY + 52) + '" r="8" fill="#1f2937" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="3 2"/>';
-				svg += '<text x="' + (legendX + 18) + '" y="' + (legendY + 56) + '" fill="#fbbf24" font-size="9" font-weight="700" text-anchor="middle">?</text>';
-				svg += '<text x="' + (legendX + 32) + '" y="' + (legendY + 56) + '" fill="#cbd5e1" font-size="10">Host não cadastrado no Zabbix</text>';
+				const legendW = 240;
+				const legendH = 84;
+				const legendX = 1800 - legendW - 10;
+				const legendY = 1100 - legendH - 10;
+				svg += '<g class="topology-legend" pointer-events="none" font-family="Arial, sans-serif">';
+				svg += '<rect x="' + legendX + '" y="' + legendY + '" width="' + legendW + '" height="' + legendH + '" rx="6" ry="6" '
+					+ 'fill="#0b1220" stroke="#334155" stroke-width="1" opacity="0.92"/>';
+				svg += '<text x="' + (legendX + 10) + '" y="' + (legendY + 16) + '" fill="#e2e8f0" font-size="11" font-weight="700">Linhas</text>';
+				// UP por utilização
+				svg += '<line x1="' + (legendX + 10) + '" y1="' + (legendY + 30) + '" x2="' + (legendX + 30) + '" y2="' + (legendY + 30) + '" stroke="#22c55e" stroke-width="3"/>';
+				svg += '<text x="' + (legendX + 36) + '" y="' + (legendY + 33) + '" fill="#cbd5e1" font-size="10">UP &lt; ' + utilWarnPct + '%</text>';
+				svg += '<line x1="' + (legendX + 110) + '" y1="' + (legendY + 30) + '" x2="' + (legendX + 130) + '" y2="' + (legendY + 30) + '" stroke="#facc15" stroke-width="3"/>';
+				svg += '<text x="' + (legendX + 136) + '" y="' + (legendY + 33) + '" fill="#cbd5e1" font-size="10">' + utilWarnPct + '–' + utilCritPct + '%</text>';
+				svg += '<line x1="' + (legendX + 10) + '" y1="' + (legendY + 46) + '" x2="' + (legendX + 30) + '" y2="' + (legendY + 46) + '" stroke="#ef4444" stroke-width="3"/>';
+				svg += '<text x="' + (legendX + 36) + '" y="' + (legendY + 49) + '" fill="#cbd5e1" font-size="10">≥ ' + utilCritPct + '%</text>';
+				svg += '<line x1="' + (legendX + 110) + '" y1="' + (legendY + 46) + '" x2="' + (legendX + 130) + '" y2="' + (legendY + 46) + '" stroke="#ef4444" stroke-width="3" stroke-dasharray="6 4"/>';
+				svg += '<text x="' + (legendX + 136) + '" y="' + (legendY + 49) + '" fill="#cbd5e1" font-size="10">DOWN</text>';
+				// Não cadastrado
+				svg += '<circle cx="' + (legendX + 18) + '" cy="' + (legendY + 68) + '" r="7" fill="#1f2937" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="3 2"/>';
+				svg += '<text x="' + (legendX + 18) + '" y="' + (legendY + 71) + '" fill="#fbbf24" font-size="9" font-weight="700" text-anchor="middle">?</text>';
+				svg += '<text x="' + (legendX + 32) + '" y="' + (legendY + 71) + '" fill="#cbd5e1" font-size="10">Host não cadastrado</text>';
 				svg += '</g>';
 
 				svg += '</svg>';
-				svg += '</div>';
 
 				graphEl.innerHTML = svg;
 
 				const svgEl = graphEl.querySelector('svg');
 				if (!svgEl) return;
+
+				// ---------- PAN & ZOOM (viewBox) ----------
+				// Helper: converte coords da tela em coords SVG considerando viewBox atual.
+				function screenToSvg(clientX, clientY) {
+					const rect = svgEl.getBoundingClientRect();
+					if (rect.width === 0 || rect.height === 0) {
+						return { x: viewBox.x, y: viewBox.y };
+					}
+					// preserveAspectRatio="xMidYMid meet" → escala uniforme com letterbox
+					const scale = Math.min(rect.width / viewBox.w, rect.height / viewBox.h);
+					const renderedW = viewBox.w * scale;
+					const renderedH = viewBox.h * scale;
+					const offsetX = (rect.width - renderedW) / 2;
+					const offsetY = (rect.height - renderedH) / 2;
+					const px = clientX - rect.left - offsetX;
+					const py = clientY - rect.top - offsetY;
+					return { x: viewBox.x + px / scale, y: viewBox.y + py / scale };
+				}
+
+				svgEl.addEventListener('wheel', function (event) {
+					event.preventDefault();
+					const factor = event.deltaY < 0 ? (1 / 1.15) : 1.15;
+					const newW = Math.max(200, Math.min(VIEW_W * 6, viewBox.w * factor));
+					const newH = Math.max(200, Math.min(VIEW_H * 6, viewBox.h * factor));
+					const point = screenToSvg(event.clientX, event.clientY);
+					const ratioX = (point.x - viewBox.x) / viewBox.w;
+					const ratioY = (point.y - viewBox.y) / viewBox.h;
+					viewBox = {
+						x: point.x - ratioX * newW,
+						y: point.y - ratioY * newH,
+						w: newW,
+						h: newH
+					};
+					setSvgViewBox();
+					saveViewBox();
+				}, { passive: false });
+
+				// Pan: pointerdown no fundo (rect topology-bg), arrasta a viewBox.
+				let panState = null;
+				svgEl.addEventListener('pointerdown', function (event) {
+					if (!event.target || !event.target.classList.contains('topology-bg')) return;
+					event.preventDefault();
+					const start = screenToSvg(event.clientX, event.clientY);
+					panState = {
+						pointerId: event.pointerId,
+						startClientX: event.clientX,
+						startClientY: event.clientY,
+						originVB: { x: viewBox.x, y: viewBox.y },
+						startPoint: start
+					};
+					try { svgEl.setPointerCapture(event.pointerId); } catch (e) {}
+					svgEl.style.cursor = 'grabbing';
+				});
+				svgEl.addEventListener('pointermove', function (event) {
+					if (!panState || panState.pointerId !== event.pointerId) return;
+					const rect = svgEl.getBoundingClientRect();
+					const scale = Math.min(rect.width / viewBox.w, rect.height / viewBox.h);
+					if (!scale) return;
+					viewBox.x = panState.originVB.x - (event.clientX - panState.startClientX) / scale;
+					viewBox.y = panState.originVB.y - (event.clientY - panState.startClientY) / scale;
+					if (Math.abs(event.clientX - panState.startClientX) > 2
+					 || Math.abs(event.clientY - panState.startClientY) > 2) {
+						panState.moved = true;
+					}
+					setSvgViewBox();
+				});
+				function endPan(event) {
+					if (!panState || panState.pointerId !== event.pointerId) return;
+					try { svgEl.releasePointerCapture(event.pointerId); } catch (e) {}
+					svgEl.style.cursor = '';
+					if (panState.moved) suppressClickUntil = Date.now() + 220;
+					panState = null;
+					saveViewBox();
+				}
+				svgEl.addEventListener('pointerup', endPan);
+				svgEl.addEventListener('pointercancel', endPan);
+				// ---------- /PAN & ZOOM ----------
 
 				// Tooltip de hover (criado uma única vez por widget)
 				let tooltipEl = rootEl.querySelector('.topology-link-tooltip');
@@ -1459,7 +1568,12 @@
 				});
 
 				graphEl.addEventListener('click', function (event) {
-					if (event.target === svgEl || event.target === graphEl) {
+					if (Date.now() < suppressClickUntil) return;
+					if (
+						event.target === svgEl
+						|| event.target === graphEl
+						|| (event.target && event.target.classList && event.target.classList.contains('topology-bg'))
+					) {
 						clearFocus();
 					}
 				});
@@ -1470,6 +1584,26 @@
 				event.stopPropagation();
 				clearFocus();
 			});
+
+			if (resetLayoutBtn) {
+				resetLayoutBtn.addEventListener('click', function (event) {
+					event.preventDefault();
+					event.stopPropagation();
+					if (!confirm('Resetar posições, expansão e zoom deste widget?')) return;
+					try {
+						localStorage.removeItem(storageKey);
+						localStorage.removeItem(storageKey + ':expanded');
+						localStorage.removeItem(viewKey);
+					}
+					catch (e) {}
+					Object.keys(savedPositions).forEach((k) => { delete savedPositions[k]; });
+					Object.keys(expandedState).forEach((k) => { delete expandedState[k]; });
+					viewBox = { x: 0, y: 0, w: VIEW_W, h: VIEW_H };
+					selectedNode = '';
+					rootEl.dataset.selectedNode = '';
+					scheduleDraw();
+				});
+			}
 
 			document.addEventListener('keydown', function (event) {
 				if (event.key === 'Escape') {
