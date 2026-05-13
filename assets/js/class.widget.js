@@ -160,7 +160,7 @@
 		return base || normalizeName(name);
 	}
 
-	const DRAG_GAIN = 0.5;
+	const DRAG_GAIN = 1;
 
 	function buildModel(links) {
 		const nodesMap = {};
