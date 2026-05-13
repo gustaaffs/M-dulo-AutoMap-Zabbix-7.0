@@ -8,6 +8,24 @@ use CControllerResponseData;
 
 class WidgetView extends CControllerDashboardWidgetView {
 
+	private const CACHE_TTL_SECONDS = 30;
+	private const CACHE_PREFIX = 'topology_widget_test:v1:';
+
+	private function cacheGet(string $key) {
+		if (function_exists('apcu_fetch')) {
+			$ok = false;
+			$value = apcu_fetch(self::CACHE_PREFIX . $key, $ok);
+			return $ok ? $value : null;
+		}
+		return null;
+	}
+
+	private function cacheSet(string $key, $value): void {
+		if (function_exists('apcu_store')) {
+			apcu_store(self::CACHE_PREFIX . $key, $value, self::CACHE_TTL_SECONDS);
+		}
+	}
+
 	private function normalizeNodeName(string $name): string {
 		$name = trim($name);
 		$name = strtolower($name);
@@ -64,6 +82,22 @@ class WidgetView extends CControllerDashboardWidgetView {
 			return;
 		}
 
+		// Cache curto (TTL=30s) para reduzir carga na API/DB quando vários
+		// dashboards/abas exibem o mesmo widget. A chave inclui grupo + centrais.
+		$cache_key = $selected_group . ':' . implode(',', $center_hostids);
+		$cached = $this->cacheGet($cache_key);
+
+		if (is_array($cached)) {
+			$response['group_name']             = $cached['group_name'] ?? '';
+			$response['unique_links']           = $cached['unique_links'] ?? [];
+			$response['central_hosts']          = $cached['central_hosts'] ?? [];
+			$response['interface_status_items'] = $cached['interface_status_items'] ?? [];
+			$response['interface_traffic_items']= $cached['interface_traffic_items'] ?? [];
+			$response['message']                = $cached['message'] ?? '';
+			$this->setResponse(new CControllerResponseData($response));
+			return;
+		}
+
 		$groups = API::HostGroup()->get([
 			'output' => ['groupid', 'name'],
 			'groupids' => [$selected_group]
@@ -84,6 +118,14 @@ class WidgetView extends CControllerDashboardWidgetView {
 
 		if (!$hosts) {
 			$response['message'] = 'Nenhum host monitorado encontrado no grupo selecionado.';
+			$this->cacheSet($cache_key, [
+				'group_name' => $response['group_name'],
+				'unique_links' => [],
+				'central_hosts' => [],
+				'interface_status_items' => [],
+				'interface_traffic_items' => [],
+				'message' => $response['message']
+			]);
 			$this->setResponse(new CControllerResponseData($response));
 			return;
 		}
@@ -107,6 +149,14 @@ class WidgetView extends CControllerDashboardWidgetView {
 
 		if (!is_array($items) || !$items) {
 			$response['message'] = 'Nenhum item "Vizinho CDP" ou "Vizinho LLDP" foi encontrado.';
+			$this->cacheSet($cache_key, [
+				'group_name' => $response['group_name'],
+				'unique_links' => [],
+				'central_hosts' => [],
+				'interface_status_items' => [],
+				'interface_traffic_items' => [],
+				'message' => $response['message']
+			]);
 			$this->setResponse(new CControllerResponseData($response));
 			return;
 		}
@@ -273,6 +323,15 @@ class WidgetView extends CControllerDashboardWidgetView {
 				}
 			}
 		}
+
+		$this->cacheSet($cache_key, [
+			'group_name'              => $response['group_name'],
+			'unique_links'            => $response['unique_links'],
+			'central_hosts'           => $response['central_hosts'],
+			'interface_status_items'  => $response['interface_status_items'],
+			'interface_traffic_items' => $response['interface_traffic_items'],
+			'message'                 => $response['message']
+		]);
 
 		$this->setResponse(new CControllerResponseData($response));
 	}

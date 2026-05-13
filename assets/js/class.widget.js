@@ -146,6 +146,43 @@
 		return (v >= 100 ? v.toFixed(0) : v.toFixed(2)) + ' ' + units[i];
 	}
 
+	// Agrega status de uma lista de membros [{statusHost, statusPort}]
+	// Retorna 'up' se ALGUM estiver up; 'down' se TODOS estiverem down; null se desconhecido.
+	function aggregateMembersStatus(statusMap, members) {
+		if (!members || !members.length) return null;
+		let anyUp = false;
+		let anyDown = false;
+		let anyKnown = false;
+		members.forEach((m) => {
+			const info = getStatusInfo(statusMap, m.statusHost, m.statusPort);
+			if (!info) return;
+			anyKnown = true;
+			if (info.status === 'up') anyUp = true;
+			else if (info.status === 'down') anyDown = true;
+		});
+		if (!anyKnown) return null;
+		if (anyUp) return 'up';
+		if (anyDown) return 'down';
+		return null;
+	}
+
+	// Soma de tráfego (in/out) de todos os membros conhecidos.
+	function aggregateMembersTraffic(trafficMap, members) {
+		if (!members || !members.length) return null;
+		let inSum = 0, outSum = 0, hasIn = false, hasOut = false;
+		members.forEach((m) => {
+			const t = getTrafficInfo(trafficMap, m.statusHost, m.statusPort);
+			if (!t) return;
+			if (typeof t.in === 'number' && isFinite(t.in)) { inSum += t.in; hasIn = true; }
+			if (typeof t.out === 'number' && isFinite(t.out)) { outSum += t.out; hasOut = true; }
+		});
+		if (!hasIn && !hasOut) return null;
+		return {
+			in: hasIn ? inSum : null,
+			out: hasOut ? outSum : null
+		};
+	}
+
 	function getStatusInfo(statusMap, host, port) {
 		const h = normalizeName(host || '');
 		const p = normalizePort(port || '');
@@ -419,7 +456,7 @@
 	function buildCollapsedVisibleGraph(model, anchors, ownership) {
 		const visibleNodes = anchors.slice().sort(naturalCompare);
 		const visibleLinks = [];
-		const seen = new Set();
+		const linkIndex = {};
 
 		model.nodes.forEach((node) => {
 			const neighbors = model.adjacency[node] || [];
@@ -436,20 +473,32 @@
 				if (source === target) return;
 
 				const pairKey = [source, target].sort(naturalCompare).join('|') + '|' + (n.protocol || '');
-				if (seen.has(pairKey)) return;
+				const memberKey = (n.statusHost || '') + '|' + (n.statusPort || '');
 
-				visibleLinks.push({
-					source: source,
-					target: target,
-					protocol: n.protocol || '',
-					port: '',
-					statusHost: n.statusHost || '',
-					statusPort: n.statusPort || ''
-				});
+				let entry = linkIndex[pairKey];
+				if (!entry) {
+					entry = {
+						source: source,
+						target: target,
+						protocol: n.protocol || '',
+						port: '',
+						statusHost: '',
+						statusPort: '',
+						members: [],
+						_seenMembers: {}
+					};
+					linkIndex[pairKey] = entry;
+					visibleLinks.push(entry);
+				}
 
-				seen.add(pairKey);
+				if (!entry._seenMembers[memberKey] && n.statusHost) {
+					entry._seenMembers[memberKey] = true;
+					entry.members.push({ statusHost: n.statusHost, statusPort: n.statusPort });
+				}
 			});
 		});
+
+		visibleLinks.forEach((l) => { delete l._seenMembers; });
 
 		return { nodes: visibleNodes, links: visibleLinks };
 	}
@@ -457,7 +506,7 @@
 	function buildExpandedVisibleGraph(model, anchors, expandedState, ownership) {
 		const visibleNodes = new Set();
 		const visibleLinks = [];
-		const seen = new Set();
+		const linkIndex = {};
 
 		anchors.forEach((a) => visibleNodes.add(a));
 
@@ -493,21 +542,32 @@
 
 				const isAgg = source === ownerA && target === ownerB;
 				const pairKey = [source, target].sort(naturalCompare).join('|') + '|' + (n.protocol || '') + '|' + (isAgg ? 'agg' : (n.port || ''));
+				const memberKey = (n.statusHost || '') + '|' + (n.statusPort || '');
 
-				if (seen.has(pairKey)) return;
+				let entry = linkIndex[pairKey];
+				if (!entry) {
+					entry = {
+						source: source,
+						target: target,
+						protocol: n.protocol || '',
+						port: isAgg ? '' : (n.port || ''),
+						statusHost: isAgg ? '' : (n.statusHost || ''),
+						statusPort: isAgg ? '' : (n.statusPort || ''),
+						members: [],
+						_seenMembers: {}
+					};
+					linkIndex[pairKey] = entry;
+					visibleLinks.push(entry);
+				}
 
-				visibleLinks.push({
-					source: source,
-					target: target,
-					protocol: n.protocol || '',
-					port: isAgg ? '' : (n.port || ''),
-					statusHost: isAgg ? '' : (n.statusHost || ''),
-					statusPort: isAgg ? '' : (n.statusPort || '')
-				});
-
-				seen.add(pairKey);
+				if (!entry._seenMembers[memberKey] && n.statusHost) {
+					entry._seenMembers[memberKey] = true;
+					entry.members.push({ statusHost: n.statusHost, statusPort: n.statusPort });
+				}
 			});
 		});
+
+		visibleLinks.forEach((l) => { delete l._seenMembers; });
 
 		return {
 			nodes: Array.from(visibleNodes).sort(naturalCompare),
@@ -728,6 +788,75 @@
 				});
 			}
 
+			// Atualiza apenas os atributos SVG dos elementos afetados pelo drag,
+			// sem regerar todo o innerHTML. Usado em pointermove para drag fluido.
+			function applyDragVisualUpdate(moveNodes) {
+				if (!moveNodes || !moveNodes.length) return;
+				const moveSet = new Set(moveNodes);
+
+				moveNodes.forEach((node) => {
+					const pos = savedPositions[node];
+					if (!pos) return;
+
+					const g = graphEl.querySelector('.topology-node[data-node="' + (window.CSS && CSS.escape ? CSS.escape(node) : node.replace(/"/g, '\\"')) + '"]');
+					if (!g) return;
+
+					const circle = g.querySelector('.topology-node-circle');
+					const letter = g.querySelector('.topology-node-letter');
+					const label = g.querySelector('.topology-node-label');
+
+					if (circle) {
+						circle.setAttribute('cx', pos.x);
+						circle.setAttribute('cy', pos.y);
+					}
+					if (letter) {
+						letter.setAttribute('x', pos.x);
+						letter.setAttribute('y', pos.y + 4);
+					}
+					if (label) {
+						const r = parseFloat(label.getAttribute('data-radius')) || 19;
+						label.setAttribute('x', pos.x);
+						label.setAttribute('y', pos.y + r + 18);
+					}
+
+					const toggle = g.querySelector('.topology-toggle');
+					if (toggle) {
+						const r = parseFloat(toggle.getAttribute('data-radius')) || 30;
+						const tCircle = toggle.querySelector('.topology-toggle-circle');
+						const tText = toggle.querySelector('.topology-toggle-text');
+						if (tCircle) {
+							tCircle.setAttribute('cx', pos.x + r - 2);
+							tCircle.setAttribute('cy', pos.y - r + 2);
+						}
+						if (tText) {
+							tText.setAttribute('x', pos.x + r - 2);
+							tText.setAttribute('y', pos.y - r + 6);
+						}
+					}
+				});
+
+				// Atualiza endpoints das linhas que tocam algum nó movido
+				const lines = graphEl.querySelectorAll('.topology-link-line, .topology-link-hit');
+				lines.forEach((line) => {
+					const src = line.getAttribute('data-src');
+					const tgt = line.getAttribute('data-tgt');
+					if (moveSet.has(src)) {
+						const p = savedPositions[src];
+						if (p) {
+							line.setAttribute('x1', p.x);
+							line.setAttribute('y1', p.y);
+						}
+					}
+					if (moveSet.has(tgt)) {
+						const p = savedPositions[tgt];
+						if (p) {
+							line.setAttribute('x2', p.x);
+							line.setAttribute('y2', p.y);
+						}
+					}
+				});
+			}
+
 			function draw() {
 				const width = 1800;
 				const height = 1100;
@@ -760,7 +889,7 @@
 				svg += '<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1100" viewBox="0 0 1800 1100" style="display:block;">';
 				svg += '<rect x="0" y="0" width="1800" height="1100" fill="#0f172a"/>';
 
-				visible.links.forEach((link) => {
+				visible.links.forEach((link, linkIdx) => {
 					const s = link.source;
 					const t = link.target;
 
@@ -771,51 +900,43 @@
 					if (String(link.protocol || '').toUpperCase() === 'LLDP') {
 						color = '#34d399';
 					}
-					const sInfo = link.statusHost
-						? getStatusInfo(statusMap, link.statusHost, link.statusPort)
-						: null;
-					if (sInfo) {
-						if (sInfo.status === 'up') color = '#22c55e';
-						else if (sInfo.status === 'down') color = '#ef4444';
+
+					// Status: usa membros se houver (cobre tanto link individual quanto agregado),
+					// senão tenta o statusHost/statusPort principal.
+					let aggStatus = aggregateMembersStatus(statusMap, link.members);
+					if (!aggStatus && link.statusHost) {
+						const sInfo = getStatusInfo(statusMap, link.statusHost, link.statusPort);
+						if (sInfo) aggStatus = sInfo.status;
 					}
+					if (aggStatus === 'up') color = '#22c55e';
+					else if (aggStatus === 'down') color = '#ef4444';
 
 					const dash = String(link.protocol || '').toUpperCase() === 'LLDP' ? ' stroke-dasharray="6 3" ' : '';
-					const opacity = active ? 0.9 : 0.12;
-					const strokeWidth = active ? 2.4 : 1.0;
+					const opacity = active ? 0.9 : 0.18;
+					const strokeWidth = active ? 2.6 : 1.2;
 
-					svg += '<line '
-						+ 'x1="' + positions[s].x + '" '
-						+ 'y1="' + positions[s].y + '" '
-						+ 'x2="' + positions[t].x + '" '
-						+ 'y2="' + positions[t].y + '" '
+					const x1 = positions[s].x, y1 = positions[s].y;
+					const x2 = positions[t].x, y2 = positions[t].y;
+
+					// Linha visível
+					svg += '<line class="topology-link-line" '
+						+ 'data-src="' + esc(s) + '" data-tgt="' + esc(t) + '" '
+						+ 'x1="' + x1 + '" y1="' + y1 + '" '
+						+ 'x2="' + x2 + '" y2="' + y2 + '" '
 						+ 'stroke="' + color + '" '
 						+ 'stroke-width="' + strokeWidth + '" '
 						+ 'opacity="' + opacity + '" '
 						+ dash
-						+ '/>';
+						+ 'pointer-events="none" />';
 
-					// Label de tráfego sobre a linha (apenas quando algum nó está em foco
-					// e este link toca o nó selecionado, para não poluir a tela)
-					if (selectedNode && active && link.statusHost) {
-						const traffic = getTrafficInfo(trafficMap, link.statusHost, link.statusPort);
-						if (traffic && (typeof traffic.in === 'number' || typeof traffic.out === 'number')) {
-							const mx = (positions[s].x + positions[t].x) / 2;
-							const my = (positions[s].y + positions[t].y) / 2;
-							const inStr = typeof traffic.in === 'number' ? formatBps(traffic.in) : '-';
-							const outStr = typeof traffic.out === 'number' ? formatBps(traffic.out) : '-';
-							const label = '↓ ' + inStr + '  ↑ ' + outStr;
-							const padX = 6;
-							const approxW = label.length * 6.2 + padX * 2;
-							svg += '<g pointer-events="none">';
-							svg += '<rect x="' + (mx - approxW / 2) + '" y="' + (my - 11) + '" '
-								+ 'width="' + approxW + '" height="16" rx="4" ry="4" '
-								+ 'fill="#0b1220" stroke="' + color + '" stroke-opacity="0.6" stroke-width="1" opacity="0.92"/>';
-							svg += '<text x="' + mx + '" y="' + (my + 1) + '" '
-								+ 'fill="#e2e8f0" font-size="10" font-family="Arial, sans-serif" '
-								+ 'text-anchor="middle" font-weight="600">' + esc(label) + '</text>';
-							svg += '</g>';
-						}
-					}
+					// Hit-line invisível (mais larga) para facilitar o hover
+					svg += '<line class="topology-link-hit" '
+						+ 'data-link-idx="' + linkIdx + '" '
+						+ 'data-src="' + esc(s) + '" data-tgt="' + esc(t) + '" '
+						+ 'x1="' + x1 + '" y1="' + y1 + '" '
+						+ 'x2="' + x2 + '" y2="' + y2 + '" '
+						+ 'stroke="#000000" stroke-opacity="0" stroke-width="14" '
+						+ 'pointer-events="stroke" style="cursor:help;" />';
 				});
 
 				visible.nodes.forEach((node) => {
@@ -844,15 +965,15 @@
 					const y = positions[node].y;
 
 					svg += '<g class="topology-node" data-node="' + esc(node) + '" style="cursor:grab;">';
-					svg += '<circle cx="' + x + '" cy="' + y + '" r="' + radius + '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + strokeWidth + '" opacity="' + nodeOpacity + '"/>';
-					svg += '<text x="' + x + '" y="' + (y + 4) + '" fill="#ffffff" font-size="11" font-weight="700" text-anchor="middle" font-family="Arial, sans-serif" opacity="' + nodeOpacity + '">R</text>';
-					svg += '<text x="' + x + '" y="' + (y + radius + 18) + '" fill="#e2e8f0" font-size="11" text-anchor="middle" font-family="Arial, sans-serif" opacity="' + nodeOpacity + '">' + esc(shortName(node, 16)) + '</text>';
+					svg += '<circle class="topology-node-circle" cx="' + x + '" cy="' + y + '" r="' + radius + '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + strokeWidth + '" opacity="' + nodeOpacity + '"/>';
+					svg += '<text class="topology-node-letter" x="' + x + '" y="' + (y + 4) + '" fill="#ffffff" font-size="11" font-weight="700" text-anchor="middle" font-family="Arial, sans-serif" opacity="' + nodeOpacity + '">R</text>';
+					svg += '<text class="topology-node-label" data-radius="' + radius + '" x="' + x + '" y="' + (y + radius + 18) + '" fill="#e2e8f0" font-size="11" text-anchor="middle" font-family="Arial, sans-serif" opacity="' + nodeOpacity + '">' + esc(shortName(node, 16)) + '</text>';
 
 					if (isCentral) {
 						const symbol = isExpanded ? '−' : '+';
-						svg += '<g class="topology-toggle" data-node="' + esc(node) + '" style="cursor:pointer;">';
-						svg += '<circle cx="' + (x + radius - 2) + '" cy="' + (y - radius + 2) + '" r="11" fill="#111827" stroke="#94a3b8" stroke-width="1.5"/>';
-						svg += '<text x="' + (x + radius - 2) + '" y="' + (y - radius + 6) + '" fill="#f8fafc" font-size="14" text-anchor="middle" font-family="Arial, sans-serif" font-weight="700">' + symbol + '</text>';
+						svg += '<g class="topology-toggle" data-node="' + esc(node) + '" data-radius="' + radius + '" style="cursor:pointer;">';
+						svg += '<circle class="topology-toggle-circle" cx="' + (x + radius - 2) + '" cy="' + (y - radius + 2) + '" r="11" fill="#111827" stroke="#94a3b8" stroke-width="1.5"/>';
+						svg += '<text class="topology-toggle-text" x="' + (x + radius - 2) + '" y="' + (y - radius + 6) + '" fill="#f8fafc" font-size="14" text-anchor="middle" font-family="Arial, sans-serif" font-weight="700">' + symbol + '</text>';
 						svg += '</g>';
 					}
 
@@ -866,6 +987,99 @@
 
 				const svgEl = graphEl.querySelector('svg');
 				if (!svgEl) return;
+
+				// Tooltip de hover (criado uma única vez por widget)
+				let tooltipEl = rootEl.querySelector('.topology-link-tooltip');
+				if (!tooltipEl) {
+					tooltipEl = document.createElement('div');
+					tooltipEl.className = 'topology-link-tooltip';
+					tooltipEl.style.cssText = 'display:none; position:absolute; z-index:40; pointer-events:none; '
+						+ 'background:#0b1220; color:#e5e7eb; border:1px solid #334155; border-radius:6px; '
+						+ 'padding:6px 9px; font-size:12px; font-family:Arial, sans-serif; '
+						+ 'box-shadow:0 6px 16px rgba(0,0,0,0.4); max-width:340px; line-height:1.45;';
+					rootEl.appendChild(tooltipEl);
+				}
+
+				function hideLinkTooltip() {
+					tooltipEl.style.display = 'none';
+				}
+
+				function showLinkTooltipFor(linkIdx, clientX, clientY) {
+					const link = visible.links[linkIdx];
+					if (!link) return;
+
+					const status = aggregateMembersStatus(statusMap, link.members)
+						|| (link.statusHost ? (getStatusInfo(statusMap, link.statusHost, link.statusPort) || {}).status : null)
+						|| 'desconhecido';
+					const statusColor = status === 'up' ? '#22c55e' : status === 'down' ? '#ef4444' : '#94a3b8';
+
+					let traffic = aggregateMembersTraffic(trafficMap, link.members);
+					if (!traffic && link.statusHost) {
+						const t = getTrafficInfo(trafficMap, link.statusHost, link.statusPort);
+						if (t) traffic = { in: typeof t.in === 'number' ? t.in : null, out: typeof t.out === 'number' ? t.out : null };
+					}
+
+					const memberCount = (link.members && link.members.length) || 0;
+					const aggregated = memberCount > 1;
+
+					let html = '';
+					html += '<div style="font-weight:700; margin-bottom:4px;">'
+						+ esc(link.source) + ' ↔ ' + esc(link.target) + '</div>';
+					html += '<div style="color:#cbd5e1;">Protocolo: ' + esc(link.protocol || '-') + '</div>';
+					if (link.port) {
+						html += '<div style="color:#cbd5e1;">Porta: ' + esc(link.port) + '</div>';
+					}
+					html += '<div style="color:' + statusColor + '; font-weight:600;">'
+						+ 'Status: ' + esc(status) + (aggregated ? ' (' + memberCount + ' enlaces)' : '') + '</div>';
+
+					if (traffic && (typeof traffic.in === 'number' || typeof traffic.out === 'number')) {
+						const inStr = typeof traffic.in === 'number' ? formatBps(traffic.in) : '-';
+						const outStr = typeof traffic.out === 'number' ? formatBps(traffic.out) : '-';
+						html += '<div style="margin-top:4px; color:#a7f3d0;">'
+							+ '↓ RX: ' + esc(inStr) + ' &nbsp; ↑ TX: ' + esc(outStr) + '</div>';
+					}
+					else {
+						html += '<div style="margin-top:4px; color:#94a3b8;">Sem dados de tráfego</div>';
+					}
+
+					tooltipEl.innerHTML = html;
+					tooltipEl.style.display = 'block';
+
+					const rootRect = rootEl.getBoundingClientRect();
+					const tipRect = tooltipEl.getBoundingClientRect();
+					let left = clientX - rootRect.left + 14;
+					let top = clientY - rootRect.top + 14;
+					if (left + tipRect.width > rootRect.width - 8) left = rootRect.width - tipRect.width - 8;
+					if (top + tipRect.height > rootRect.height - 8) top = rootRect.height - tipRect.height - 8;
+					if (left < 8) left = 8;
+					if (top < 8) top = 8;
+					tooltipEl.style.left = left + 'px';
+					tooltipEl.style.top = top + 'px';
+				}
+
+				graphEl.querySelectorAll('.topology-link-hit').forEach((el) => {
+					el.addEventListener('mouseenter', function (event) {
+						const idx = parseInt(this.dataset.linkIdx, 10);
+						if (isNaN(idx)) return;
+						showLinkTooltipFor(idx, event.clientX, event.clientY);
+					});
+					el.addEventListener('mousemove', function (event) {
+						if (tooltipEl.style.display !== 'block') return;
+						const rootRect = rootEl.getBoundingClientRect();
+						const tipRect = tooltipEl.getBoundingClientRect();
+						let left = event.clientX - rootRect.left + 14;
+						let top = event.clientY - rootRect.top + 14;
+						if (left + tipRect.width > rootRect.width - 8) left = rootRect.width - tipRect.width - 8;
+						if (top + tipRect.height > rootRect.height - 8) top = rootRect.height - tipRect.height - 8;
+						if (left < 8) left = 8;
+						if (top < 8) top = 8;
+						tooltipEl.style.left = left + 'px';
+						tooltipEl.style.top = top + 'px';
+					});
+					el.addEventListener('mouseleave', function () {
+						hideLinkTooltip();
+					});
+				});
 
 				graphEl.querySelectorAll('.topology-toggle').forEach((el) => {
 					el.addEventListener('click', function (event) {
@@ -958,7 +1172,9 @@
 							};
 						});
 
-						scheduleDraw();
+						// Atualiza apenas os atributos SVG dos elementos movidos
+						// (sem regerar todo o innerHTML — drag fluido).
+						applyDragVisualUpdate(dragState.moveNodes);
 					});
 
 					el.addEventListener('pointerup', function (event) {
@@ -1071,5 +1287,5 @@
 		setTimeout(scanAndRender, 0);
 	}
 
-	setInterval(scanAndRender, 1500);
+	setInterval(scanAndRender, 5000);
 })();
