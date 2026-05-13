@@ -726,10 +726,23 @@
 		return positions;
 	}
 
-	function layoutExpandedGraph(model, anchors, expandedState, ownership, width, height) {
+	function layoutExpandedGraph(model, anchors, expandedState, ownership, width, height, savedPositions) {
 		const positions = layoutCollapsedAnchors(anchors, width, height);
 		const centerX = width / 2;
 		const centerY = height * 0.53;
+
+		// Aplica savedPositions nos próprios CORES antes de posicionar filhos:
+		// assim, ao expandir um core que foi arrastado, os filhos seguem o pai.
+		if (savedPositions) {
+			anchors.forEach((anchor) => {
+				if (savedPositions[anchor]) {
+					positions[anchor] = {
+						x: savedPositions[anchor].x,
+						y: savedPositions[anchor].y
+					};
+				}
+			});
+		}
 
 		anchors.forEach((anchor) => {
 			if (!expandedState[anchor]) return;
@@ -777,7 +790,7 @@
 		return positions;
 	}
 
-	function buildMoveGroup(model, startNode, anchorSet, visibleNodesSet) {
+	function buildMoveGroup(model, startNode, anchorSet, visibleNodesSet, ownership, savedPositions) {
 		const visited = new Set();
 		const moveSet = new Set();
 
@@ -806,6 +819,21 @@
 		}
 
 		walk(startNode);
+
+		// Se o startNode é um CORE colapsado, também leve junto os filhos
+		// "escondidos" que já têm posição salva (foram arrastados antes).
+		// Filhos sem savedPosition seguem naturalmente via layoutExpandedGraph
+		// porque o anchor agora carrega suas posições.
+		if (anchorSet && anchorSet.has(startNode) && ownership && savedPositions) {
+			(model.nodes || []).forEach((n) => {
+				if (n === startNode) return;
+				if (anchorSet.has(n)) return;
+				if (ownership[n] !== startNode) return;
+				if (!savedPositions[n]) return;
+				moveSet.add(n);
+			});
+		}
+
 		return Array.from(moveSet);
 	}
 
@@ -908,9 +936,19 @@
 			const speedMap = buildSpeedMap(interfaceSpeed);
 			const model = buildModel(links);
 
-			// Hosts do grupo selecionado = nível 0 → âncoras do layout.
-			// Mantém apenas os que aparecem no grafo (em algum link visível).
+			// Hosts do grupo selecionado = nível 0 → âncoras (cores) do mapa.
+			// Eles SEMPRE aparecem, mesmo que ainda não tenham vizinhos descobertos.
 			const nodesInModel = new Set(model.nodes);
+			Object.keys(hostLevels).forEach((n) => {
+				if (hostLevels[n] === 0 && !nodesInModel.has(n)) {
+					model.nodes.push(n);
+					nodesInModel.add(n);
+					if (!model.adjacency[n]) model.adjacency[n] = [];
+					if (!model.degreeMap[n]) model.degreeMap[n] = 0;
+				}
+			});
+			model.nodes.sort(naturalCompare);
+
 			const lvl0Anchors = Object.keys(hostLevels)
 				.filter((n) => hostLevels[n] === 0 && nodesInModel.has(n));
 
@@ -1053,7 +1091,7 @@
 					: buildCollapsedVisibleGraph(model, anchors, ownership);
 
 				const positions = anyExpanded
-					? layoutExpandedGraph(model, anchors, expandedState, ownership, width, height)
+					? layoutExpandedGraph(model, anchors, expandedState, ownership, width, height, savedPositions)
 					: layoutCollapsedAnchors(anchors, width, height);
 
 				Object.keys(savedPositions).forEach((node) => {
@@ -1202,22 +1240,18 @@
 
 					const x = positions[node].x;
 					const y = positions[node].y;
-					const letter = isUnmanaged ? '?' : 'R';
+					const letter = isUnmanaged ? '?' : (isCentral ? 'C' : 'R');
 
 					svg += '<g class="topology-node" data-node="' + esc(node) + '" data-unmanaged="' + (isUnmanaged ? '1' : '0') + '" style="cursor:grab;">';
-					svg += '<circle class="topology-node-circle" cx="' + x + '" cy="' + y + '" r="' + radius + '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + strokeWidth + '"' + strokeDash + ' opacity="' + nodeOpacity + '"/>';
-					svg += '<text class="topology-node-letter" x="' + x + '" y="' + (y + 4) + '" fill="#ffffff" font-size="11" font-weight="700" text-anchor="middle" font-family="Arial, sans-serif" opacity="' + nodeOpacity + '">' + letter + '</text>';
-					svg += '<text class="topology-node-label" data-radius="' + radius + '" x="' + x + '" y="' + (y + radius + 18) + '" fill="' + (isUnmanaged ? '#94a3b8' : '#e2e8f0') + '" font-size="11" text-anchor="middle" font-family="Arial, sans-serif" opacity="' + nodeOpacity + '">' + esc(shortName(node, 16)) + (isUnmanaged ? ' (?)' : '') + '</text>';
 
-					// Badge do nível (canto superior esquerdo do nó)
-					if (level !== null) {
-						const bx = x - radius + 2;
-						const by = y - radius + 2;
-						svg += '<g class="topology-node-level" pointer-events="none" opacity="' + nodeOpacity + '">';
-						svg += '<circle cx="' + bx + '" cy="' + by + '" r="9" fill="#0b1220" stroke="#94a3b8" stroke-width="1"/>';
-						svg += '<text x="' + bx + '" y="' + (by + 3) + '" fill="#fde68a" font-size="9" font-weight="700" text-anchor="middle" font-family="Arial, sans-serif">N' + level + '</text>';
-						svg += '</g>';
+					// Halo (anel externo) para destacar nós CORE (hosts do grupo selecionado)
+					if (isCentral && !isUnmanaged) {
+						svg += '<circle cx="' + x + '" cy="' + y + '" r="' + (radius + 6) + '" fill="none" stroke="#fbbf24" stroke-width="1.5" opacity="' + (nodeOpacity * 0.45) + '"/>';
 					}
+
+					svg += '<circle class="topology-node-circle" cx="' + x + '" cy="' + y + '" r="' + radius + '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + strokeWidth + '"' + strokeDash + ' opacity="' + nodeOpacity + '"/>';
+					svg += '<text class="topology-node-letter" x="' + x + '" y="' + (y + 4) + '" fill="#ffffff" font-size="' + (isCentral ? 13 : 11) + '" font-weight="700" text-anchor="middle" font-family="Arial, sans-serif" opacity="' + nodeOpacity + '">' + letter + '</text>';
+					svg += '<text class="topology-node-label" data-radius="' + radius + '" x="' + x + '" y="' + (y + radius + 18) + '" fill="' + (isUnmanaged ? '#94a3b8' : (isCentral ? '#fde68a' : '#e2e8f0')) + '" font-size="' + (isCentral ? 12 : 11) + '" font-weight="' + (isCentral ? '700' : '400') + '" text-anchor="middle" font-family="Arial, sans-serif" opacity="' + nodeOpacity + '">' + esc(shortName(node, 16)) + (isUnmanaged ? ' (?)' : '') + '</text>';
 
 					if (isCentral) {
 						const symbol = isExpanded ? '−' : '+';
@@ -1469,7 +1503,7 @@
 						event.stopPropagation();
 						hidePopup(popupEl);
 
-						const moveNodes = buildMoveGroup(model, node, anchorSet, visibleNodesSet);
+						const moveNodes = buildMoveGroup(model, node, anchorSet, visibleNodesSet, ownership, savedPositions);
 						const originPositions = {};
 
 						moveNodes.forEach((moveNode) => {
@@ -1477,6 +1511,13 @@
 								originPositions[moveNode] = {
 									x: positions[moveNode].x,
 									y: positions[moveNode].y
+								};
+							}
+							else if (savedPositions[moveNode]) {
+								// Nó escondido (CORE colapsado): usa savedPosition como origem.
+								originPositions[moveNode] = {
+									x: savedPositions[moveNode].x,
+									y: savedPositions[moveNode].y
 								};
 							}
 						});
