@@ -1475,20 +1475,9 @@
 					});
 				});
 
-				graphEl.querySelectorAll('.topology-toggle').forEach((el) => {
-					el.addEventListener('click', function (event) {
-						event.preventDefault();
-						event.stopPropagation();
-
-						const node = this.dataset.node || '';
-						if (!node) return;
-
-						expandedState[node] = !expandedState[node];
-						saveExpandedState(storageKey, expandedState);
-						hidePopup(popupEl);
-						scheduleDraw();
-					});
-				});
+				// NOTE: o handler do toggle (.topology-toggle) NÃO é mais anexado por elemento aqui.
+				// Foi movido para event-delegation em `graphEl` (anexado uma única vez fora de draw()),
+				// para evitar qualquer ambiguidade de hit-test/closure entre redraws.
 
 				graphEl.querySelectorAll('.topology-node').forEach((el) => {
 					el.addEventListener('pointerdown', function (event) {
@@ -1644,17 +1633,53 @@
 					});
 				});
 
-				graphEl.addEventListener('click', function (event) {
-					if (Date.now() < suppressClickUntil) return;
-					if (
-						event.target === svgEl
-						|| event.target === graphEl
-						|| (event.target && event.target.classList && event.target.classList.contains('topology-bg'))
-					) {
-						clearFocus();
-					}
-				});
 			}
+
+			// ----------------------------------------------------------------
+			// Listeners ANEXADOS UMA ÚNICA VEZ (fora de draw()) para evitar leak.
+			// graphEl é o mesmo nó DOM em todos os draws (apenas o innerHTML muda),
+			// então listeners anexados aqui sobrevivem aos redraws sem duplicar.
+			// ----------------------------------------------------------------
+
+			// Toggle dos CORES via event-delegation: a fonte de verdade do nó
+			// clicado é SEMPRE o `<g class="topology-toggle">` mais próximo do
+			// alvo do clique, independente de onde o listener está atribuído.
+			graphEl.addEventListener('click', function (event) {
+				const toggleEl = event.target && event.target.closest
+					? event.target.closest('.topology-toggle')
+					: null;
+				if (!toggleEl || !graphEl.contains(toggleEl)) return;
+
+				event.preventDefault();
+				event.stopPropagation();
+
+				const node = toggleEl.getAttribute('data-node') || '';
+				if (!node) return;
+
+				expandedState[node] = !expandedState[node];
+				saveExpandedState(storageKey, expandedState);
+				hidePopup(popupEl);
+				scheduleDraw();
+			}, true); // capture phase: garante que rodamos antes de qualquer outro click handler em filhos
+
+			// ClearFocus em clique no fundo (também movido para fora de draw()).
+			graphEl.addEventListener('click', function (event) {
+				if (Date.now() < suppressClickUntil) return;
+
+				// Se o clique foi em um toggle, o handler delegado acima já tratou (e parou propagação).
+				if (event.target && event.target.closest && event.target.closest('.topology-toggle')) {
+					return;
+				}
+
+				const svgElNow = graphEl.querySelector('svg');
+				if (
+					event.target === svgElNow
+					|| event.target === graphEl
+					|| (event.target && event.target.classList && event.target.classList.contains('topology-bg'))
+				) {
+					clearFocus();
+				}
+			});
 
 			clearFocusBtn.addEventListener('click', function (event) {
 				event.preventDefault();
