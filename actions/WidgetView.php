@@ -51,6 +51,7 @@ class WidgetView extends CControllerDashboardWidgetView {
 			'unique_links' => [],
 			'central_hosts' => [],
 			'interface_status_items' => [],
+			'interface_traffic_items' => [],
 			'message' => '',
 			'user' => [
 				'debug_mode' => $this->getDebugMode()
@@ -111,6 +112,7 @@ class WidgetView extends CControllerDashboardWidgetView {
 		}
 
 		$unique_map = [];
+		$neighbor_names_norm = [];
 
 		foreach ($items as $item) {
 			$source_host_raw = $host_map[$item['hostid']] ?? ('HostID ' . $item['hostid']);
@@ -140,6 +142,8 @@ class WidgetView extends CControllerDashboardWidgetView {
 			if ($source_norm === '' || $target_norm === '') {
 				continue;
 			}
+
+			$neighbor_names_norm[$target_norm] = $target_raw;
 
 			$pair = [$source_norm, $target_norm];
 			sort($pair, SORT_STRING);
@@ -180,28 +184,93 @@ class WidgetView extends CControllerDashboardWidgetView {
 			$response['message'] = 'Os itens foram encontrados, mas nenhum link único foi gerado.';
 		}
 
-		// Interface operational status items (porta está no vizinho/target)
-		$status_items = API::Item()->get([
-			'output'    => ['itemid', 'hostid', 'name', 'lastvalue'],
-			'hostids'   => $hostids,
+		// Resolve hostids dos vizinhos (target) que possivelmente estão fora do grupo
+		// para que possamos buscar status/tráfego nas portas deles também.
+		$expanded_hostids = $hostids;
+		$expanded_host_map = $host_map;
+
+		if ($neighbor_names_norm) {
+			$missing_norm = [];
+			$known_norm_set = [];
+
+			foreach ($host_map as $hname) {
+				$known_norm_set[$this->normalizeNodeName($hname)] = true;
+			}
+
+			foreach ($neighbor_names_norm as $norm => $raw) {
+				if (!isset($known_norm_set[$norm])) {
+					$missing_norm[$norm] = $raw;
+				}
+			}
+
+			if ($missing_norm) {
+				// Tenta buscar por host (technical name) e name (visible name)
+				$search_terms = array_values(array_unique(array_merge(
+					array_keys($missing_norm),
+					array_values($missing_norm)
+				)));
+
+				$extra_hosts = API::Host()->get([
+					'output' => ['hostid', 'host', 'name'],
+					'search' => [
+						'host' => $search_terms,
+						'name' => $search_terms
+					],
+					'searchByAny' => true,
+					'monitored_hosts' => true
+				]);
+
+				if (is_array($extra_hosts)) {
+					foreach ($extra_hosts as $eh) {
+						$norm_h = $this->normalizeNodeName($eh['name']);
+						$norm_t = $this->normalizeNodeName($eh['host']);
+						if (isset($missing_norm[$norm_h]) || isset($missing_norm[$norm_t])) {
+							if (!isset($expanded_host_map[$eh['hostid']])) {
+								$expanded_host_map[$eh['hostid']] = $eh['name'];
+								$expanded_hostids[] = $eh['hostid'];
+							}
+						}
+					}
+				}
+			}
+		}
+
+		$expanded_hostids = array_values(array_unique($expanded_hostids));
+
+		// Interface operational status + bandwidth (porta está no vizinho/target)
+		$iface_items = API::Item()->get([
+			'output'    => ['itemid', 'hostid', 'name', 'lastvalue', 'units'],
+			'hostids'   => $expanded_hostids,
 			'monitored' => true,
-			'search'    => ['name' => 'Operational status'],
+			'search'    => [
+				'name' => ['Operational status', 'Bits received', 'Bits sent']
+			],
+			'searchByAny' => true,
 			'sortfield' => 'name',
 			'sortorder' => 'ASC'
 		]);
 
-		if (is_array($status_items)) {
-			foreach ($status_items as $item) {
+		if (is_array($iface_items)) {
+			foreach ($iface_items as $item) {
 				$name = trim($item['name']);
-				// Aceita apenas itens que começam com "Interface"
 				if (stripos($name, 'Interface ') !== 0) {
 					continue;
 				}
-				$response['interface_status_items'][] = [
-					'host'  => $host_map[$item['hostid']] ?? ('Host_' . $item['hostid']),
+
+				$host_label = $expanded_host_map[$item['hostid']] ?? ('Host_' . $item['hostid']);
+				$record = [
+					'host'  => $host_label,
 					'name'  => $name,
-					'value' => (string) $item['lastvalue']
+					'value' => (string) $item['lastvalue'],
+					'units' => (string) ($item['units'] ?? '')
 				];
+
+				if (stripos($name, 'Operational status') !== false) {
+					$response['interface_status_items'][] = $record;
+				}
+				elseif (stripos($name, 'Bits received') !== false || stripos($name, 'Bits sent') !== false) {
+					$response['interface_traffic_items'][] = $record;
+				}
 			}
 		}
 

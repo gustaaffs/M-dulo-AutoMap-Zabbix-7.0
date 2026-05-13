@@ -88,6 +88,64 @@
 		return map;
 	}
 
+	// Interpreta nome de item de tráfego: "Interface Fa0/1(...): Bits received|Bits sent"
+	function parseTrafficItem(item) {
+		const host = normalizeName(item.host || '');
+		const name = String(item.name || '');
+
+		const match = name.match(/^Interface\s+(.+?)\s*(?:\(.*?\)\s*)?:\s*Bits\s+(received|sent)\s*$/i);
+		if (!match) return null;
+
+		const rawIf = match[1].trim();
+		const normPort = normalizePort(rawIf);
+		const direction = match[2].toLowerCase() === 'received' ? 'in' : 'out';
+
+		if (!host || !normPort) return null;
+
+		return {
+			host,
+			rawIf,
+			normPort,
+			direction,
+			value: parseFloat(item.value),
+			units: String(item.units || '')
+		};
+	}
+
+	function buildTrafficMap(items) {
+		const map = {};
+		(items || []).forEach((item) => {
+			const parsed = parseTrafficItem(item);
+			if (!parsed) return;
+			if (!map[parsed.host]) map[parsed.host] = {};
+			if (!map[parsed.host][parsed.normPort]) {
+				map[parsed.host][parsed.normPort] = { rawIf: parsed.rawIf };
+			}
+			map[parsed.host][parsed.normPort][parsed.direction] = parsed.value;
+			map[parsed.host][parsed.normPort].units = parsed.units || 'bps';
+		});
+		return map;
+	}
+
+	function getTrafficInfo(trafficMap, host, port) {
+		const h = normalizeName(host || '');
+		const p = normalizePort(port || '');
+		if (!h || !p || !trafficMap[h]) return null;
+		return trafficMap[h][p] || null;
+	}
+
+	function formatBps(value) {
+		if (typeof value !== 'number' || !isFinite(value) || value <= 0) return '0 bps';
+		const units = ['bps', 'Kbps', 'Mbps', 'Gbps', 'Tbps'];
+		let i = 0;
+		let v = value;
+		while (v >= 1000 && i < units.length - 1) {
+			v /= 1000;
+			i++;
+		}
+		return (v >= 100 ? v.toFixed(0) : v.toFixed(2)) + ' ' + units[i];
+	}
+
 	function getStatusInfo(statusMap, host, port) {
 		const h = normalizeName(host || '');
 		const p = normalizePort(port || '');
@@ -102,7 +160,7 @@
 		return base || normalizeName(name);
 	}
 
-	const DRAG_GAIN = 1.8;
+	const DRAG_GAIN = 0.5;
 
 	function buildModel(links) {
 		const nodesMap = {};
@@ -230,7 +288,7 @@
 		};
 	}
 
-	function renderPopupContent(node, model, centralHosts, statusMap) {
+	function renderPopupContent(node, model, centralHosts, statusMap, trafficMap) {
 		const neighbors = (model.adjacency[node] || []).slice().sort((a, b) => naturalCompare(a.peer, b.peer));
 		const degree = model.degreeMap[node] || 0;
 		const isCentral = (centralHosts || []).some((h) => normalizeName(h.normalized || h.name || '') === node);
@@ -248,12 +306,13 @@
 		html += '<div style="margin-bottom:8px;"><strong>Grau:</strong> ' + degree + '</div>';
 		html += '<div style="margin-bottom:12px;"><strong>Host central:</strong> ' + (isCentral ? 'sim' : 'não') + '</div>';
 		html += '<div style="font-size:14px; font-weight:700; margin-bottom:8px;">Conexões</div>';
-		html += '<div style="max-height:240px; overflow:auto; border-top:1px solid #1f2937; padding-top:8px;">';
+		html += '<div style="max-height:280px; overflow:auto; border-top:1px solid #1f2937; padding-top:8px;">';
 
 		neighbors.forEach((n) => {
 			const info = getStatusInfo(statusMap, n.statusHost, n.statusPort);
 			const status = info ? info.status : null;
 			const statusColor = status === 'up' ? '#22c55e' : status === 'down' ? '#ef4444' : '#94a3b8';
+			const traffic = getTrafficInfo(trafficMap, n.statusHost, n.statusPort);
 
 			html += '<div style="padding:8px 0; border-bottom:1px solid #1f2937;">';
 			html += '<div style="font-weight:600;">' + esc(n.peer) + '</div>';
@@ -264,6 +323,12 @@
 				if (info.rawIf) {
 					html += '<div style="font-size:11px; color:#64748b;">Interface: ' + esc(info.rawIf) + '</div>';
 				}
+			}
+			if (traffic && (typeof traffic.in === 'number' || typeof traffic.out === 'number')) {
+				const inStr = typeof traffic.in === 'number' ? formatBps(traffic.in) : '-';
+				const outStr = typeof traffic.out === 'number' ? formatBps(traffic.out) : '-';
+				html += '<div style="font-size:12px; color:#a7f3d0; margin-top:2px;">'
+					+ '↓ RX: ' + esc(inStr) + ' &nbsp; ↑ TX: ' + esc(outStr) + '</div>';
 			}
 			html += '</div>';
 		});
@@ -593,6 +658,7 @@
 			let links = [];
 			let centralHosts = [];
 			let interfaceStatuses = [];
+			let interfaceTraffic = [];
 
 			try {
 				links = JSON.parse(atob(rootEl.dataset.links || ''));
@@ -616,7 +682,15 @@
 				interfaceStatuses = [];
 			}
 
+			try {
+				interfaceTraffic = JSON.parse(atob(rootEl.dataset.interfaceTraffic || ''));
+			}
+			catch (e) {
+				interfaceTraffic = [];
+			}
+
 			const statusMap = buildStatusMap(interfaceStatuses);
+			const trafficMap = buildTrafficMap(interfaceTraffic);
 			const model = buildModel(links);
 			const preferredAnchors = centralHosts
 				.map((host) => normalizeName(host.normalized || host.name || ''))
@@ -719,6 +793,29 @@
 						+ 'opacity="' + opacity + '" '
 						+ dash
 						+ '/>';
+
+					// Label de tráfego sobre a linha (apenas quando algum nó está em foco
+					// e este link toca o nó selecionado, para não poluir a tela)
+					if (selectedNode && active && link.statusHost) {
+						const traffic = getTrafficInfo(trafficMap, link.statusHost, link.statusPort);
+						if (traffic && (typeof traffic.in === 'number' || typeof traffic.out === 'number')) {
+							const mx = (positions[s].x + positions[t].x) / 2;
+							const my = (positions[s].y + positions[t].y) / 2;
+							const inStr = typeof traffic.in === 'number' ? formatBps(traffic.in) : '-';
+							const outStr = typeof traffic.out === 'number' ? formatBps(traffic.out) : '-';
+							const label = '↓ ' + inStr + '  ↑ ' + outStr;
+							const padX = 6;
+							const approxW = label.length * 6.2 + padX * 2;
+							svg += '<g pointer-events="none">';
+							svg += '<rect x="' + (mx - approxW / 2) + '" y="' + (my - 11) + '" '
+								+ 'width="' + approxW + '" height="16" rx="4" ry="4" '
+								+ 'fill="#0b1220" stroke="' + color + '" stroke-opacity="0.6" stroke-width="1" opacity="0.92"/>';
+							svg += '<text x="' + mx + '" y="' + (my + 1) + '" '
+								+ 'fill="#e2e8f0" font-size="10" font-family="Arial, sans-serif" '
+								+ 'text-anchor="middle" font-weight="600">' + esc(label) + '</text>';
+							svg += '</g>';
+						}
+					}
 				});
 
 				visible.nodes.forEach((node) => {
@@ -921,7 +1018,7 @@
 						rootEl.dataset.selectedNode = node;
 						scheduleDraw();
 
-						const html = renderPopupContent(node, model, centralHosts, statusMap);
+						const html = renderPopupContent(node, model, centralHosts, statusMap, trafficMap);
 						showPopup(rootEl, popupEl, html, event.clientX, event.clientY);
 					});
 				});
