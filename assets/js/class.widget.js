@@ -1026,12 +1026,17 @@
 					if (!g) return;
 
 					const circle = g.querySelector('.topology-node-circle');
+					const halo = g.querySelector('.topology-node-halo');
 					const letter = g.querySelector('.topology-node-letter');
 					const label = g.querySelector('.topology-node-label');
 
 					if (circle) {
 						circle.setAttribute('cx', pos.x);
 						circle.setAttribute('cy', pos.y);
+					}
+					if (halo) {
+						halo.setAttribute('cx', pos.x);
+						halo.setAttribute('cy', pos.y);
 					}
 					if (letter) {
 						letter.setAttribute('x', pos.x);
@@ -1246,7 +1251,7 @@
 
 					// Halo (anel externo) para destacar nós CORE (hosts do grupo selecionado)
 					if (isCentral && !isUnmanaged) {
-						svg += '<circle cx="' + x + '" cy="' + y + '" r="' + (radius + 6) + '" fill="none" stroke="#fbbf24" stroke-width="1.5" opacity="' + (nodeOpacity * 0.45) + '"/>';
+						svg += '<circle class="topology-node-halo" cx="' + x + '" cy="' + y + '" r="' + (radius + 6) + '" fill="none" stroke="#fbbf24" stroke-width="1.5" opacity="' + (nodeOpacity * 0.45) + '"/>';
 					}
 
 					svg += '<circle class="topology-node-circle" cx="' + x + '" cy="' + y + '" r="' + radius + '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + strokeWidth + '"' + strokeDash + ' opacity="' + nodeOpacity + '"/>';
@@ -1656,8 +1661,34 @@
 				const node = toggleEl.getAttribute('data-node') || '';
 				if (!node) return;
 
+				// ===== DEBUG TEMPORÁRIO (cross-toggle bug) — remover depois =====
+				const before = JSON.parse(JSON.stringify(expandedState));
+				console.log('[TOPOLOGY-TOGGLE] click →', {
+					nodeClicado: node,
+					targetTag: event.target && event.target.tagName,
+					targetClass: event.target && event.target.getAttribute && event.target.getAttribute('class'),
+					toggleDataNode: toggleEl.getAttribute('data-node'),
+					expandedAntes: before
+				});
+				// ================================================================
+
 				expandedState[node] = !expandedState[node];
 				saveExpandedState(storageKey, expandedState);
+
+				// ===== DEBUG TEMPORÁRIO — remover depois =====
+				const changed = [];
+				Object.keys(expandedState).forEach((k) => {
+					if (!!expandedState[k] !== !!before[k]) changed.push(k);
+				});
+				console.log('[TOPOLOGY-TOGGLE] depois →', {
+					expandedDepois: JSON.parse(JSON.stringify(expandedState)),
+					chavesQueMudaram: changed
+				});
+				if (changed.length !== 1) {
+					console.warn('[TOPOLOGY-TOGGLE] ⚠ MUDOU MAIS DE UMA CHAVE!', changed);
+				}
+				// =============================================
+
 				hidePopup(popupEl);
 				scheduleDraw();
 			}, true); // capture phase: garante que rodamos antes de qualquer outro click handler em filhos

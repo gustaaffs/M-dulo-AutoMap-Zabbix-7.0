@@ -8,21 +8,26 @@ use CControllerResponseData;
 
 class WidgetView extends CControllerDashboardWidgetView {
 
-	private const CACHE_TTL_SECONDS = 30;
-	private const CACHE_PREFIX = 'topology_widget_test:v2:';
+	// Topologia (BFS + resolução de hosts) muda raramente → TTL longo.
+	private const TOPOLOGY_CACHE_TTL_SECONDS = 900; // 15 min
+	// Telemetria (status/tráfego/speed) muda sempre → TTL curto.
+	private const TELEMETRY_CACHE_TTL_SECONDS = 30;
 
-	private function cacheGet(string $key) {
+	private const TOPOLOGY_CACHE_PREFIX  = 'topology_widget_test:topo:v1:';
+	private const TELEMETRY_CACHE_PREFIX = 'topology_widget_test:tele:v1:';
+
+	private function cacheGet(string $prefix, string $key) {
 		if (function_exists('apcu_fetch')) {
 			$ok = false;
-			$value = apcu_fetch(self::CACHE_PREFIX . $key, $ok);
+			$value = apcu_fetch($prefix . $key, $ok);
 			return $ok ? $value : null;
 		}
 		return null;
 	}
 
-	private function cacheSet(string $key, $value): void {
+	private function cacheSet(string $prefix, string $key, $value, int $ttl): void {
 		if (function_exists('apcu_store')) {
-			apcu_store(self::CACHE_PREFIX . $key, $value, self::CACHE_TTL_SECONDS);
+			apcu_store($prefix . $key, $value, $ttl);
 		}
 	}
 
@@ -183,18 +188,30 @@ class WidgetView extends CControllerDashboardWidgetView {
 			return;
 		}
 
-		$cache_key = $selected_group . ':L' . $max_levels;
-		$cached = $this->cacheGet($cache_key);
+		// =========================================================
+		// CACHE EM DUAS CAMADAS (refresh soft no backend):
+		//  - Topologia (BFS + resolu\u00e7\u00e3o de hosts): TTL longo (15 min)
+		//  - Telemetria (status/tr\u00e1fego/speed): TTL curto (30s)
+		// =========================================================
+		$topo_cache_key = $selected_group . ':L' . $max_levels;
+		$topo_cached = $this->cacheGet(self::TOPOLOGY_CACHE_PREFIX, $topo_cache_key);
 
-		if (is_array($cached)) {
-			foreach ([
-				'group_name','unique_links','host_levels','unmanaged_nodes',
-				'interface_status_items','interface_traffic_items','interface_speed_items','message'
-			] as $k) {
-				if (array_key_exists($k, $cached)) {
-					$response[$k] = $cached[$k];
+		$expanded_host_map = null;
+
+		if (is_array($topo_cached)) {
+			foreach (['group_name','unique_links','host_levels','unmanaged_nodes','message'] as $k) {
+				if (array_key_exists($k, $topo_cached)) {
+					$response[$k] = $topo_cached[$k];
 				}
 			}
+			if (isset($topo_cached['expanded_host_map']) && is_array($topo_cached['expanded_host_map'])) {
+				$expanded_host_map = $topo_cached['expanded_host_map'];
+			}
+		}
+
+		// Se a topologia veio do cache, pulamos o BFS direto para a parte de telemetria.
+		if ($expanded_host_map !== null) {
+			$this->fetchAndAttachTelemetry($response, $expanded_host_map);
 			$this->setResponse(new CControllerResponseData($response));
 			return;
 		}
@@ -214,7 +231,14 @@ class WidgetView extends CControllerDashboardWidgetView {
 
 		if (!$lvl0_hosts) {
 			$response['message'] = 'Nenhum host monitorado encontrado no grupo selecionado.';
-			$this->cacheSet($cache_key, $response);
+			$this->cacheSet(self::TOPOLOGY_CACHE_PREFIX, $topo_cache_key, [
+				'group_name'        => $response['group_name'],
+				'unique_links'      => [],
+				'host_levels'       => new \stdClass(),
+				'unmanaged_nodes'   => [],
+				'message'           => $response['message'],
+				'expanded_host_map' => []
+			], self::TOPOLOGY_CACHE_TTL_SECONDS);
 			$this->setResponse(new CControllerResponseData($response));
 			return;
 		}
@@ -328,58 +352,82 @@ class WidgetView extends CControllerDashboardWidgetView {
 		}
 		$response['unmanaged_nodes'] = array_values(array_unique($unmanaged_nodes));
 
-		// === Interface operational status + bandwidth + speed ===
+		// Salva cache de TOPOLOGIA (sem telemetria, TTL longo).
+		$this->cacheSet(self::TOPOLOGY_CACHE_PREFIX, $topo_cache_key, [
+			'group_name'        => $response['group_name'],
+			'unique_links'      => $response['unique_links'],
+			'host_levels'       => $response['host_levels'],
+			'unmanaged_nodes'   => $response['unmanaged_nodes'],
+			'message'           => $response['message'],
+			'expanded_host_map' => $expanded_host_map
+		], self::TOPOLOGY_CACHE_TTL_SECONDS);
+
+		// Telemetria (TTL curto, cache pr\u00f3prio).
+		$this->fetchAndAttachTelemetry($response, $expanded_host_map);
+
+		$this->setResponse(new CControllerResponseData($response));
+	}
+
+	/**
+	 * Busca status operacional, tr\u00e1fego e speed das interfaces dos hosts informados,
+	 * com cache de TTL curto independente do cache de topologia.
+	 */
+	private function fetchAndAttachTelemetry(array &$response, array $expanded_host_map): void {
 		$expanded_hostids = array_values(array_unique(array_keys($expanded_host_map)));
-		if ($expanded_hostids) {
-			$iface_items = API::Item()->get([
-				'output'    => ['itemid', 'hostid', 'name', 'lastvalue', 'units'],
-				'hostids'   => $expanded_hostids,
-				'monitored' => true,
-				'search'    => [
-					'name' => ['Operational status', 'Bits received', 'Bits sent', 'Speed']
-				],
-				'searchByAny' => true,
-				'sortfield' => 'name',
-				'sortorder' => 'ASC'
-			]);
+		if (!$expanded_hostids) return;
 
-			if (is_array($iface_items)) {
-				foreach ($iface_items as $item) {
-					$name = trim($item['name']);
-					if (stripos($name, 'Interface ') !== 0) continue;
+		sort($expanded_hostids, SORT_STRING);
+		$tele_cache_key = md5(implode(',', $expanded_hostids));
 
-					$host_label = $expanded_host_map[$item['hostid']] ?? ('Host_' . $item['hostid']);
-					$record = [
-						'host'  => $host_label,
-						'name'  => $name,
-						'value' => (string) $item['lastvalue'],
-						'units' => (string) ($item['units'] ?? '')
-					];
+		$tele_cached = $this->cacheGet(self::TELEMETRY_CACHE_PREFIX, $tele_cache_key);
+		if (is_array($tele_cached)) {
+			$response['interface_status_items']  = $tele_cached['interface_status_items']  ?? [];
+			$response['interface_traffic_items'] = $tele_cached['interface_traffic_items'] ?? [];
+			$response['interface_speed_items']   = $tele_cached['interface_speed_items']   ?? [];
+			return;
+		}
 
-					if (stripos($name, 'Operational status') !== false) {
-						$response['interface_status_items'][] = $record;
-					}
-					elseif (stripos($name, 'Bits received') !== false || stripos($name, 'Bits sent') !== false) {
-						$response['interface_traffic_items'][] = $record;
-					}
-					elseif (preg_match('/:\s*Speed\s*$/i', $name)) {
-						$response['interface_speed_items'][] = $record;
-					}
+		$iface_items = API::Item()->get([
+			'output'    => ['itemid', 'hostid', 'name', 'lastvalue', 'units'],
+			'hostids'   => $expanded_hostids,
+			'monitored' => true,
+			'search'    => [
+				'name' => ['Operational status', 'Bits received', 'Bits sent', 'Speed']
+			],
+			'searchByAny' => true,
+			'sortfield' => 'name',
+			'sortorder' => 'ASC'
+		]);
+
+		if (is_array($iface_items)) {
+			foreach ($iface_items as $item) {
+				$name = trim($item['name']);
+				if (stripos($name, 'Interface ') !== 0) continue;
+
+				$host_label = $expanded_host_map[$item['hostid']] ?? ('Host_' . $item['hostid']);
+				$record = [
+					'host'  => $host_label,
+					'name'  => $name,
+					'value' => (string) $item['lastvalue'],
+					'units' => (string) ($item['units'] ?? '')
+				];
+
+				if (stripos($name, 'Operational status') !== false) {
+					$response['interface_status_items'][] = $record;
+				}
+				elseif (stripos($name, 'Bits received') !== false || stripos($name, 'Bits sent') !== false) {
+					$response['interface_traffic_items'][] = $record;
+				}
+				elseif (preg_match('/:\s*Speed\s*$/i', $name)) {
+					$response['interface_speed_items'][] = $record;
 				}
 			}
 		}
 
-		$this->cacheSet($cache_key, [
-			'group_name'              => $response['group_name'],
-			'unique_links'            => $response['unique_links'],
-			'host_levels'             => $response['host_levels'],
-			'unmanaged_nodes'         => $response['unmanaged_nodes'],
+		$this->cacheSet(self::TELEMETRY_CACHE_PREFIX, $tele_cache_key, [
 			'interface_status_items'  => $response['interface_status_items'],
 			'interface_traffic_items' => $response['interface_traffic_items'],
-			'interface_speed_items'   => $response['interface_speed_items'],
-			'message'                 => $response['message']
-		]);
-
-		$this->setResponse(new CControllerResponseData($response));
+			'interface_speed_items'   => $response['interface_speed_items']
+		], self::TELEMETRY_CACHE_TTL_SECONDS);
 	}
 }
