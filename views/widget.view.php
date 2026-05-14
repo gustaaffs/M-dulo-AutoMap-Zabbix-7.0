@@ -66,10 +66,15 @@ $reset_btn->addClass('topology-reset-layout-btn');
 $reset_btn->setAttribute('title', _('Resetar layout (posições e zoom) deste widget'));
 $reset_btn->setAttribute('style', 'position:absolute; top:12px; left:12px; z-index:25; padding:6px 10px; border-radius:8px; background:#111827; color:#e5e7eb; border:1px solid #374151; cursor:pointer; user-select:none; font-size:12px;');
 
+$back_btn = new CDiv('← Voltar');
+$back_btn->addClass('topology-drilldown-back-btn');
+$back_btn->setAttribute('style', 'position:absolute; top:12px; left:90px; z-index:25; display:none; padding:6px 12px; border-radius:8px; background:#1e3a5f; color:#93c5fd; border:1px solid #2563eb; cursor:pointer; user-select:none; font-size:12px; font-weight:600;');
+
 $root->addItem($graph);
 $root->addItem($popup);
 $root->addItem($focus_btn);
 $root->addItem($reset_btn);
+$root->addItem($back_btn);
 
 $widget->addItem($root);
 $widget->show();

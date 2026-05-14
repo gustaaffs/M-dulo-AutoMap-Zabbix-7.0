@@ -330,6 +330,69 @@
 		return { nodes, degreeMap, adjacency };
 	}
 
+	function buildDrillDownSubgraph(adjacency, root, maxLevels) {
+		const visited = new Set();
+		const nodeLevels = {};
+		const queue = [{ node: root, level: 0 }];
+
+		while (queue.length > 0) {
+			const item = queue.shift();
+			const node = item.node;
+			const level = item.level;
+			if (visited.has(node)) continue;
+			visited.add(node);
+			nodeLevels[node] = level;
+
+			if (level < maxLevels) {
+				(adjacency[node] || []).forEach(function (n) {
+					if (!visited.has(n.peer)) {
+						queue.push({ node: n.peer, level: level + 1 });
+					}
+				});
+			}
+		}
+
+		const linkIndex = {};
+		const links = [];
+
+		visited.forEach(function (node) {
+			(adjacency[node] || []).forEach(function (n) {
+				if (!visited.has(n.peer)) return;
+				const pairKey = [node, n.peer].sort(naturalCompare).join('|') + '|' + (n.protocol || '');
+				const memberKey = (n.statusHost || '') + '|' + (n.statusPort || '');
+
+				let entry = linkIndex[pairKey];
+				if (!entry) {
+					entry = {
+						source: node,
+						target: n.peer,
+						protocol: n.protocol || '',
+						port: n.port || '',
+						statusHost: n.statusHost || '',
+						statusPort: n.statusPort || '',
+						members: [],
+						_seenMembers: {}
+					};
+					linkIndex[pairKey] = entry;
+					links.push(entry);
+				}
+
+				if (!entry._seenMembers[memberKey] && n.statusHost) {
+					entry._seenMembers[memberKey] = true;
+					entry.members.push({ statusHost: n.statusHost, statusPort: n.statusPort });
+				}
+			});
+		});
+
+		links.forEach(function (l) { delete l._seenMembers; });
+
+		return {
+			nodes: Array.from(visited).sort(naturalCompare),
+			links: links,
+			nodeLevels: nodeLevels
+		};
+	}
+
 	function groupAnchorsBySimilarity(anchors) {
 		const map = {};
 
@@ -868,6 +931,40 @@
 		return positions;
 	}
 
+	function layoutDrillDown(root, nodeLevels, nodes, width, height) {
+		const positions = {};
+		const centerX = width / 2;
+		const centerY = height / 2;
+
+		const byLevel = {};
+		nodes.forEach(function (node) {
+			const level = nodeLevels[node] !== undefined ? nodeLevels[node] : 0;
+			if (!byLevel[level]) byLevel[level] = [];
+			byLevel[level].push(node);
+		});
+
+		positions[root] = { x: centerX, y: centerY };
+
+		Object.keys(byLevel).forEach(function (levelStr) {
+			const level = parseInt(levelStr, 10);
+			if (level === 0) return;
+
+			const nodesAtLevel = byLevel[level].slice().sort(naturalCompare);
+			const count = nodesAtLevel.length;
+			const radius = 190 + (level - 1) * 210;
+
+			nodesAtLevel.forEach(function (node, idx) {
+				const angle = -Math.PI / 2 + (idx / count) * Math.PI * 2;
+				positions[node] = {
+					x: centerX + Math.cos(angle) * radius,
+					y: centerY + Math.sin(angle) * radius
+				};
+			});
+		});
+
+		return positions;
+	}
+
 	function buildMoveGroup(model, startNode, anchorSet, visibleNodesSet, ownership, savedPositions) {
 		const visited = new Set();
 		const moveSet = new Set();
@@ -923,6 +1020,7 @@
 			const popupEl = rootEl.querySelector('.topology-test-popup');
 			const clearFocusBtn = rootEl.querySelector('.topology-clear-focus-btn');
 			const resetLayoutBtn = rootEl.querySelector('.topology-reset-layout-btn');
+			const drillDownBackBtn = rootEl.querySelector('.topology-drilldown-back-btn');
 
 			if (!graphEl || !popupEl || !clearFocusBtn) return;
 
@@ -1039,6 +1137,7 @@
 			const ownership = buildAnchorOwnership(model, anchors);
 
 			let selectedNode = rootEl.dataset.selectedNode || '';
+			let drillDownNode = null;
 			let suppressClickUntil = 0;
 			let framePending = false;
 			let dragState = null;
@@ -1075,6 +1174,10 @@
 
 			function clearFocus() {
 				hidePopup(popupEl);
+				if (drillDownNode) {
+					drillDownNode = null;
+					viewBox = { x: 0, y: 0, w: VIEW_W, h: VIEW_H };
+				}
 				selectedNode = '';
 				rootEl.dataset.selectedNode = '';
 				clearFocusBtn.style.display = 'none';
@@ -1168,28 +1271,40 @@
 				const width = 1800;
 				const height = 1100;
 
-				const anyExpanded = anchors.some((a) => expandedState[a]);
-				const visible = anyExpanded
-					? buildExpandedVisibleGraph(model, anchors, expandedState, ownership)
-					: buildCollapsedVisibleGraph(model, anchors, ownership);
+				let visible, positions, effectiveNodeLevels;
 
-				const positions = anyExpanded
-					? layoutExpandedGraph(model, anchors, expandedState, ownership, width, height, savedPositions)
-					: layoutCollapsedAnchors(anchors, width, height);
-
-				Object.keys(savedPositions).forEach((node) => {
-					if (positions[node]) {
-						positions[node] = {
-							x: savedPositions[node].x,
-							y: savedPositions[node].y
-						};
-					}
-				});
+				if (drillDownNode) {
+					const maxLevels = parseInt(widgetConfig.max_levels, 10) || 2;
+					const subgraph = buildDrillDownSubgraph(model.adjacency, drillDownNode, maxLevels);
+					effectiveNodeLevels = subgraph.nodeLevels;
+					visible = { nodes: subgraph.nodes, links: subgraph.links };
+					positions = layoutDrillDown(drillDownNode, subgraph.nodeLevels, subgraph.nodes, width, height);
+					if (drillDownBackBtn) drillDownBackBtn.style.display = 'block';
+				}
+				else {
+					effectiveNodeLevels = hostLevels;
+					const anyExpanded = anchors.some((a) => expandedState[a]);
+					visible = anyExpanded
+						? buildExpandedVisibleGraph(model, anchors, expandedState, ownership)
+						: buildCollapsedVisibleGraph(model, anchors, ownership);
+					positions = anyExpanded
+						? layoutExpandedGraph(model, anchors, expandedState, ownership, width, height, savedPositions)
+						: layoutCollapsedAnchors(anchors, width, height);
+					Object.keys(savedPositions).forEach((node) => {
+						if (positions[node]) {
+							positions[node] = {
+								x: savedPositions[node].x,
+								y: savedPositions[node].y
+							};
+						}
+					});
+					if (drillDownBackBtn) drillDownBackBtn.style.display = 'none';
+				}
 
 				const visibleNodesSet = new Set(visible.nodes);
-				const anchorSet = new Set(anchors);
+				const anchorSet = drillDownNode ? new Set([drillDownNode]) : new Set(anchors);
 
-				clearFocusBtn.style.display = selectedNode ? 'block' : 'none';
+				clearFocusBtn.style.display = (selectedNode && !drillDownNode) ? 'block' : 'none';
 
 				let svg = '';
 				svg += '<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%" '
@@ -1197,6 +1312,11 @@
 					+ 'preserveAspectRatio="xMidYMid meet" '
 					+ 'style="display:block; width:100%; height:100%; user-select:none;">';
 				svg += '<rect class="topology-bg" x="-100000" y="-100000" width="200000" height="200000" fill="#0f172a" pointer-events="all"/>';
+
+				if (drillDownNode) {
+					svg += '<text x="900" y="42" fill="#93c5fd" font-size="15" font-weight="700" text-anchor="middle" font-family="Arial, sans-serif" pointer-events="none">'
+						+ 'Visão de: ' + esc(drillDownNode) + '</text>';
+				}
 
 				visible.links.forEach((link, linkIdx) => {
 					const s = link.source;
@@ -1283,8 +1403,8 @@
 					const isSelected = selectedNode === node;
 					const isNeighbor = selectedNode && (model.adjacency[selectedNode] || []).some((n) => n.peer === node);
 					const isUnmanaged = unmanagedSet.has(node);
-					const level = (hostLevels && Object.prototype.hasOwnProperty.call(hostLevels, node))
-						? hostLevels[node] : null;
+					const level = (effectiveNodeLevels && Object.prototype.hasOwnProperty.call(effectiveNodeLevels, node))
+						? effectiveNodeLevels[node] : null;
 
 					// Cor de preenchimento base por nível (origem mais saturada, vai esmaecendo)
 					const levelFills = ['#2563eb', '#0891b2', '#7c3aed', '#475569', '#334155', '#1e293b'];
@@ -1336,7 +1456,7 @@
 					svg += '<text class="topology-node-letter" x="' + x + '" y="' + (y + 4) + '" fill="#ffffff" font-size="' + (isCentral ? 13 : 11) + '" font-weight="700" text-anchor="middle" font-family="Arial, sans-serif" opacity="' + nodeOpacity + '">' + letter + '</text>';
 					svg += '<text class="topology-node-label" data-radius="' + radius + '" x="' + x + '" y="' + (y + radius + 18) + '" fill="' + (isUnmanaged ? '#94a3b8' : (isCentral ? '#fde68a' : '#e2e8f0')) + '" font-size="' + (isCentral ? 12 : 11) + '" font-weight="' + (isCentral ? '700' : '400') + '" text-anchor="middle" font-family="Arial, sans-serif" opacity="' + nodeOpacity + '">' + esc(shortName(node, 16)) + (isUnmanaged ? ' (?)' : '') + '</text>';
 
-					if (isCentral) {
+					if (isCentral && !drillDownNode) {
 						const symbol = isExpanded ? '−' : '+';
 						svg += '<g class="topology-toggle" data-node="' + esc(node) + '" data-radius="' + radius + '" style="cursor:pointer;">';
 						svg += '<circle class="topology-toggle-circle" cx="' + (x + radius - 2) + '" cy="' + (y - radius + 2) + '" r="11" fill="#111827" stroke="#94a3b8" stroke-width="1.5"/>';
@@ -1655,7 +1775,7 @@
 						if (dragState.pointerId !== event.pointerId) return;
 
 						if (dragState.moved) {
-							saveSavedPositions(storageKey, savedPositions);
+							if (!drillDownNode) saveSavedPositions(storageKey, savedPositions);
 							suppressClickUntil = Date.now() + 220;
 						}
 
@@ -1703,16 +1823,12 @@
 
 						event.stopPropagation();
 
-						selectedNode = node;
-						rootEl.dataset.selectedNode = node;
+						drillDownNode = node;
+						selectedNode = '';
+						rootEl.dataset.selectedNode = '';
+						hidePopup(popupEl);
+						viewBox = { x: 0, y: 0, w: VIEW_W, h: VIEW_H };
 						scheduleDraw();
-
-						const html = renderPopupContent(node, model, hostLevels, statusMap, trafficMap, speedMap, {
-							unmanagedSet: unmanagedSet,
-							utilWarnPct: utilWarnPct,
-							utilCritPct: utilCritPct
-						});
-						showPopup(rootEl, popupEl, html, event.clientX, event.clientY);
 					});
 				});
 
@@ -1786,6 +1902,19 @@
 					viewBox = { x: 0, y: 0, w: VIEW_W, h: VIEW_H };
 					selectedNode = '';
 					rootEl.dataset.selectedNode = '';
+					scheduleDraw();
+				});
+			}
+
+			if (drillDownBackBtn) {
+				drillDownBackBtn.addEventListener('click', function (event) {
+					event.preventDefault();
+					event.stopPropagation();
+					drillDownNode = null;
+					selectedNode = '';
+					rootEl.dataset.selectedNode = '';
+					hidePopup(popupEl);
+					viewBox = { x: 0, y: 0, w: VIEW_W, h: VIEW_H };
 					scheduleDraw();
 				});
 			}
