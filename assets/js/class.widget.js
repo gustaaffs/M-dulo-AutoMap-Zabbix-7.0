@@ -521,30 +521,56 @@
 			ownership[a] = a;
 		});
 
-		function scoreNodeForAnchor(node, anchor) {
+		// Conta quantos filhos diretos cada anchor já recebeu — usado como
+		// desempate para filhos compartilhados (balancear carga visual).
+		const ownerLoad = {};
+		anchors.forEach((a) => { ownerLoad[a] = 0; });
+
+		// Fallback (raro): só roda se o nó não tem NENHUM anchor como vizinho direto.
+		function scoreNodeForAnchorIndirect(node, anchor) {
 			let score = 0;
 			const neighbors = model.adjacency[node] || [];
-
 			neighbors.forEach((n) => {
-				if (n.peer === anchor) score += 10;
-
 				const secondHop = model.adjacency[n.peer] || [];
 				secondHop.forEach((n2) => {
-					if (n2.peer === anchor) score += 2;
+					if (n2.peer === anchor) score += 1;
 				});
 			});
-
 			return score;
 		}
 
 		model.nodes.forEach((node) => {
 			if (anchorSet.has(node)) return;
 
+			// Anchors com conexão DIRETA ao nó.
+			const neighbors = model.adjacency[node] || [];
+			const directAnchors = [];
+			const seen = {};
+			neighbors.forEach((n) => {
+				if (anchorSet.has(n.peer) && !seen[n.peer]) {
+					seen[n.peer] = true;
+					directAnchors.push(n.peer);
+				}
+			});
+
+			if (directAnchors.length > 0) {
+				// Desempate: anchor com menos filhos atribuídos até agora;
+				// em caso de empate, ordem natural (determinístico).
+				directAnchors.sort((a, b) => {
+					if (ownerLoad[a] !== ownerLoad[b]) return ownerLoad[a] - ownerLoad[b];
+					return naturalCompare(a, b);
+				});
+				const chosen = directAnchors[0];
+				ownership[node] = chosen;
+				ownerLoad[chosen] += 1;
+				return;
+			}
+
+			// Sem nenhum anchor direto: usa heurística indireta (segundo-salto).
 			let bestAnchor = null;
 			let bestScore = 0;
-
 			anchors.forEach((anchor) => {
-				const score = scoreNodeForAnchor(node, anchor);
+				const score = scoreNodeForAnchorIndirect(node, anchor);
 				if (score > bestScore) {
 					bestScore = score;
 					bestAnchor = anchor;
@@ -553,6 +579,7 @@
 
 			if (bestAnchor) {
 				ownership[node] = bestAnchor;
+				ownerLoad[bestAnchor] += 1;
 			}
 		});
 
