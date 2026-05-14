@@ -730,6 +730,7 @@
 		const positions = layoutCollapsedAnchors(anchors, width, height);
 		const centerX = width / 2;
 		const centerY = height * 0.53;
+		const anchorSet = new Set(anchors);
 
 		// Aplica savedPositions nos próprios CORES antes de posicionar filhos:
 		// assim, ao expandir um core que foi arrastado, os filhos seguem o pai.
@@ -744,11 +745,44 @@
 			});
 		}
 
+		// Coloca filhos em leque a partir de uma posição base, em chunks concêntricos.
+		function placeFan(children, anchorPos, baseAngle, maxSpreadDeg, chunkSize, baseRadius, radiusStep) {
+			if (!children.length) return;
+			maxSpreadDeg = maxSpreadDeg || 165;
+			chunkSize    = chunkSize    || 10;
+			baseRadius   = baseRadius   || 170;
+			radiusStep   = radiusStep   || 80;
+
+			for (let i = 0; i < children.length; i += chunkSize) {
+				const chunk = children.slice(i, i + chunkSize);
+				const radius = baseRadius + (Math.floor(i / chunkSize) * radiusStep);
+				const spreadDeg = Math.min(maxSpreadDeg, 50 + (chunk.length * 7));
+				const halfSpread = (spreadDeg / 2) * Math.PI / 180;
+
+				if (chunk.length === 1) {
+					positions[chunk[0]] = {
+						x: anchorPos.x + Math.cos(baseAngle) * radius,
+						y: anchorPos.y + Math.sin(baseAngle) * radius
+					};
+				}
+				else {
+					chunk.forEach((node, idx) => {
+						const t = idx / (chunk.length - 1);
+						const ang = baseAngle - halfSpread + ((halfSpread * 2) * t);
+						positions[node] = {
+							x: anchorPos.x + Math.cos(ang) * radius,
+							y: anchorPos.y + Math.sin(ang) * radius
+						};
+					});
+				}
+			}
+		}
+
 		anchors.forEach((anchor) => {
 			if (!expandedState[anchor]) return;
 
 			const anchorPos = positions[anchor];
-			const neighbors = model.nodes
+			const owned = model.nodes
 				.filter((n) => n !== anchor && ownership[n] === anchor)
 				.sort((a, b) => {
 					const da = model.degreeMap[a] || 0;
@@ -757,34 +791,51 @@
 					return naturalCompare(a, b);
 				});
 
+			// Classifica cada filho:
+			//  - "puro": só conecta com o anchor dono → vai no leque para fora
+			//  - "compartilhado": também conecta com OUTRO anchor → fica entre os dois
+			//    (assim a linha para cada CORE fica curta, sem cruzar a tela)
+			const purelyOwned = [];
+			const sharedByOther = {}; // otherAnchor → [filhos]
+
+			owned.forEach((child) => {
+				const peers = (model.adjacency[child] || []).map((p) => p.peer);
+				const otherAnchors = peers.filter((p) => p !== anchor && anchorSet.has(p));
+
+				if (otherAnchors.length === 0) {
+					purelyOwned.push(child);
+				}
+				else {
+					// Determinístico: atribui ao "primeiro" outro anchor (ordem natural).
+					otherAnchors.sort(naturalCompare);
+					const primary = otherAnchors[0];
+					if (!sharedByOther[primary]) sharedByOther[primary] = [];
+					sharedByOther[primary].push(child);
+				}
+			});
+
+			// Filhos puros: leque para fora do centro (comportamento original).
 			const dx = anchorPos.x - centerX;
 			const dy = anchorPos.y - centerY;
 			const outwardAngle = Math.atan2(dy, dx);
+			placeFan(purelyOwned, anchorPos, outwardAngle);
 
-			for (let i = 0; i < neighbors.length; i += 10) {
-				const chunk = neighbors.slice(i, i + 10);
-				const radius = 170 + (Math.floor(i / 10) * 80);
-				const spreadDeg = Math.min(165, 95 + (chunk.length * 7));
-				const halfSpread = (spreadDeg / 2) * Math.PI / 180;
+			// Filhos compartilhados: leque estreito direcionado ao outro anchor,
+			// com raio menor para que fiquem posicionados ENTRE os dois COREs.
+			Object.keys(sharedByOther).forEach((other) => {
+				const otherPos = positions[other];
+				if (!otherPos) return;
 
-				if (chunk.length === 1) {
-					const ang = outwardAngle;
-					positions[chunk[0]] = {
-						x: anchorPos.x + Math.cos(ang) * radius,
-						y: anchorPos.y + Math.sin(ang) * radius
-					};
-				}
-				else {
-					chunk.forEach((node, idx) => {
-						const t = idx / (chunk.length - 1);
-						const ang = outwardAngle - halfSpread + ((halfSpread * 2) * t);
-						positions[node] = {
-							x: anchorPos.x + Math.cos(ang) * radius,
-							y: anchorPos.y + Math.sin(ang) * radius
-						};
-					});
-				}
-			}
+				const ddx = otherPos.x - anchorPos.x;
+				const ddy = otherPos.y - anchorPos.y;
+				const distToOther = Math.hypot(ddx, ddy) || 1;
+				const angleToOther = Math.atan2(ddy, ddx);
+
+				// Raio base ≈ 35% do caminho até o outro CORE, limitado.
+				const baseR = Math.max(140, Math.min(distToOther * 0.35, 260));
+				// Leque mais estreito (60°) pra não esbarrar nos filhos puros.
+				placeFan(sharedByOther[other], anchorPos, angleToOther, 60, 8, baseR, 70);
+			});
 		});
 
 		return positions;
@@ -1661,34 +1712,8 @@
 				const node = toggleEl.getAttribute('data-node') || '';
 				if (!node) return;
 
-				// ===== DEBUG TEMPORÁRIO (cross-toggle bug) — remover depois =====
-				const before = JSON.parse(JSON.stringify(expandedState));
-				console.log('[TOPOLOGY-TOGGLE] click →', {
-					nodeClicado: node,
-					targetTag: event.target && event.target.tagName,
-					targetClass: event.target && event.target.getAttribute && event.target.getAttribute('class'),
-					toggleDataNode: toggleEl.getAttribute('data-node'),
-					expandedAntes: before
-				});
-				// ================================================================
-
 				expandedState[node] = !expandedState[node];
 				saveExpandedState(storageKey, expandedState);
-
-				// ===== DEBUG TEMPORÁRIO — remover depois =====
-				const changed = [];
-				Object.keys(expandedState).forEach((k) => {
-					if (!!expandedState[k] !== !!before[k]) changed.push(k);
-				});
-				console.log('[TOPOLOGY-TOGGLE] depois →', {
-					expandedDepois: JSON.parse(JSON.stringify(expandedState)),
-					chavesQueMudaram: changed
-				});
-				if (changed.length !== 1) {
-					console.warn('[TOPOLOGY-TOGGLE] ⚠ MUDOU MAIS DE UMA CHAVE!', changed);
-				}
-				// =============================================
-
 				hidePopup(popupEl);
 				scheduleDraw();
 			}, true); // capture phase: garante que rodamos antes de qualquer outro click handler em filhos
