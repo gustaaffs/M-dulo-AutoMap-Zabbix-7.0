@@ -9,9 +9,9 @@ use CControllerResponseData;
 class WidgetView extends CControllerDashboardWidgetView {
 
 	// Topologia (BFS + resolução de hosts) muda raramente → TTL longo.
-	private const TOPOLOGY_CACHE_TTL_SECONDS = 900; // 15 min
+	private const TOPOLOGY_CACHE_TTL_SECONDS = 1800; // 30 min
 	// Telemetria (status/tráfego/speed) muda sempre → TTL curto.
-	private const TELEMETRY_CACHE_TTL_SECONDS = 30;
+	private const TELEMETRY_CACHE_TTL_SECONDS = 60;  // 1 min (alinhado ao refresh_rate)
 
 	private const TOPOLOGY_CACHE_PREFIX  = 'topology_widget_test:topo:v1:';
 	private const TELEMETRY_CACHE_PREFIX = 'topology_widget_test:tele:v1:';
@@ -388,15 +388,17 @@ class WidgetView extends CControllerDashboardWidgetView {
 		}
 
 		$iface_items = API::Item()->get([
-			'output'    => ['itemid', 'hostid', 'name', 'lastvalue', 'units'],
-			'hostids'   => $expanded_hostids,
-			'monitored' => true,
-			'search'    => [
+			'output'      => ['hostid', 'name', 'lastvalue', 'units'],
+			'hostids'     => $expanded_hostids,
+			'monitored'   => true,
+			'search'      => [
 				'name' => ['Operational status', 'Bits received', 'Bits sent', 'Speed']
 			],
 			'searchByAny' => true,
-			'sortfield' => 'name',
-			'sortorder' => 'ASC'
+			'startSearch' => false,
+			'sortfield'   => 'name',
+			'sortorder'   => 'ASC',
+			'limit'       => 5000
 		]);
 
 		if (is_array($iface_items)) {

@@ -16,7 +16,7 @@
     "name": "Topology Test",
     "form_class": "WidgetForm",
     "js_class": "WidgetTopologyTest",
-    "refresh_rate": 60
+    "refresh_rate": 120
   },
   "assets": {
     "js": [
